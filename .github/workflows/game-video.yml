@@ -345,7 +345,7 @@ jobs:
             SRC="short_src.mp4"
           fi
           ffmpeg -y -v error -i "$SRC" -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];[0:v]scale=1080:1080:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v]" -map "[v]" -map 0:a -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k short.mp4
-          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('upload_meta.json','utf-8'));const s={title:m.title,description:(m.description||'')+'\n#Shorts',tags:m.tags||[]};fs.writeFileSync('short_meta.json',JSON.stringify(s,null,2));console.log('Đã tạo short_meta.json (cùng tiêu đề/tags, mô tả thêm #Shorts).');"
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('upload_meta.json','utf-8'));const s={title:m.title,description:(m.description||'')+'\n#Shorts',tags:m.tags||[],hook:m.hook||null};fs.writeFileSync('short_meta.json',JSON.stringify(s,null,2));console.log('Đã tạo short_meta.json (cùng tiêu đề/tags, mô tả thêm #Shorts).');"
           echo "Đã tạo short.mp4 (1080x1920, dọc)."
 
       # Intro/outro là phần trang trí: lỗi thì job vẫn đi tiếp (nhờ
@@ -375,11 +375,34 @@ jobs:
         if: ${{ inputs.thumbnail != 'false' && inputs.max_frames == '0' }}
         continue-on-error: true
         run: |
+          # Nền thumbnail: 1 frame thật từ phân cảnh hook (mỗi video một
+          # cảnh khác nhau, không còn na ná nhau như nền vẽ sẵn). Lấy tại
+          # mốc caption của câu hook (lineTime trong upload_meta.json).
+          # Tiêu đề đặt ở phía đối diện khung chữ game: hook là thoại
+          # (khung chữ trên) thì tiêu đề xuống dưới, hook là lời dẫn
+          # (khung chữ dưới) thì tiêu đề lên trên — khỏi đè lên chữ trong
+          # frame. Không có hook / cắt frame lỗi thì giữ nền vẽ sẵn.
+          BG_ARGS=()
+          HOOK_INFO="$(node -e "try{const h=require('./upload_meta.json').hook;if(h&&typeof h.lineTime==='number')console.log(h.lineTime+' '+(h.kind||''));}catch(e){}" 2>/dev/null)"
+          if [ -n "$HOOK_INFO" ] && [ -f "${OUT}.mp4" ]; then
+            LINE_TIME="${HOOK_INFO%% *}"
+            HOOK_KIND="${HOOK_INFO##* }"
+            if [ "$HOOK_KIND" = "say" ]; then TITLE_POS="top"; else TITLE_POS="bottom"; fi
+            if ffmpeg -y -v error -ss "$LINE_TIME" -i "${OUT}.mp4" -frames:v 1 -vf scale=1280:720 -q:v 3 bg.jpg; then
+              BG_ARGS=(--bg bg.jpg --title-pos "$TITLE_POS")
+              echo "Nền thumbnail: frame tại ${LINE_TIME}s (hook kind: ${HOOK_KIND:-?}), tiêu đề ở phía ${TITLE_POS}."
+            else
+              echo "Không cắt được frame nền — dùng nền vẽ sẵn."
+            fi
+          else
+            echo "Không có hook — dùng nền vẽ sẵn."
+          fi
           node intro_outro.js \
             --script picked_script.json \
             --meta-out upload_meta.json \
             --thumbnail thumb.jpg \
-            --thumbnail-only
+            --thumbnail-only \
+            "${BG_ARGS[@]}"
 
       - name: Ghép intro + hook + video chính + outro
         if: ${{ inputs.max_frames == '0' }}
@@ -474,6 +497,26 @@ jobs:
           if [ ! -f "${OUT}.youtube.json" ]; then echo "Không có sidecar video chính — bỏ qua."; exit 0; fi
           python upload_youtube.py --set-thumbnail --sidecar "${OUT}.youtube.json" --image thumb.jpg
 
+      # Bình luận kêu gọi tương tác dưới video chính (đăng dưới tên kênh,
+      # cần scope youtube.force-ssl trong token). Lỗi thì thôi
+      # (continue-on-error) — video vẫn đã đăng xong, chỉ thiếu bình luận.
+      # Chỉ chạy khi video chính đã đăng thành công (upload_yt success);
+      # chạy thử (max_frames != 0) thì upload bị bỏ qua nên bước này cũng
+      # tự bỏ qua theo.
+      - name: Bình luận video chính (kêu gọi tương tác)
+        id: comment_main
+        if: ${{ steps.upload_yt.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DB_HOST: ${{ secrets.FTP_HOST }}
+          DB_USER: ${{ secrets.FTP_USERNAME }}
+          DB_PASS: ${{ secrets.FTP_PASSWORD }}
+          DB_PORT: ${{ inputs.db_port }}
+          DB_NAME: ${{ env.DB_NAME }}
+        run: |
+          if [ ! -f "${OUT}.youtube.json" ]; then echo "Không có sidecar video chính — bỏ qua."; exit 0; fi
+          python upload_youtube.py --comment main --sidecar "${OUT}.youtube.json" --meta upload_meta.json
+
       # Đăng Short cùng kênh với video chính (pin theo client_id trong
       # sidecar, không bốc ngẫu nhiên sang kênh khác). Lỗi thì thôi
       # (continue-on-error), file short.mp4 giữ lại trong Artifacts.
@@ -498,6 +541,22 @@ jobs:
             --privacy "${{ inputs.yt_privacy }}" --category "${{ inputs.yt_category }}" \
             --publish-at "${{ inputs.yt_publish_at }}" $KIDS
 
+      # Bình luận kêu gọi tương tác dưới video Short (cùng kênh với video
+      # chính, qua sidecar short.youtube.json). Lỗi thì thôi như trên.
+      - name: Bình luận video Short (kêu gọi tương tác)
+        id: comment_short
+        if: ${{ steps.upload_short.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DB_HOST: ${{ secrets.FTP_HOST }}
+          DB_USER: ${{ secrets.FTP_USERNAME }}
+          DB_PASS: ${{ secrets.FTP_PASSWORD }}
+          DB_PORT: ${{ inputs.db_port }}
+          DB_NAME: ${{ env.DB_NAME }}
+        run: |
+          if [ ! -f short.youtube.json ]; then echo "Không có sidecar Short — bỏ qua."; exit 0; fi
+          python upload_youtube.py --comment short --sidecar short.youtube.json --meta short_meta.json
+
       - name: Đăng file debug (mốc caption + bảng giọng + meta đăng YouTube)
         if: always()
         uses: actions/upload-artifact@v4
@@ -511,6 +570,7 @@ jobs:
             intro.mp4
             hook.mp4
             outro.mp4
+            bg.jpg
             thumb.jpg
             short.mp4
             short_meta.json
@@ -575,7 +635,7 @@ jobs:
           # nhờ xóa Artifacts ở trên, vì máy chạy vốn tự giải phóng khi
           # job kết thúc).
           rm -rf voice_work intro_silent.mp4 outro_silent.mp4 intro.mp4 hook.mp4 outro.mp4 \
-            thumb.jpg short.mp4 short_src.mp4 short_meta.json short.youtube.json \
+            bg.jpg thumb.jpg short.mp4 short_src.mp4 short_meta.json short.youtube.json \
             "${OUT}.mp4" captions.json picked_meta.json picked_music_meta.json \
             upload_meta.json "${OUT}.youtube.json" picked_script.json picked_music.mp3
           echo "Đã dọn dẹp xong."
