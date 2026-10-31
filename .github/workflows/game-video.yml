@@ -201,8 +201,16 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install chromium --with-deps
 
-      - name: Kiểm tra ffmpeg
+      # ffmpeg là bắt buộc ở mọi bước sau (render, giọng, hook, Short,
+      # ghép) nhưng có máy chạy không cài sẵn (lỗi spawn ffmpeg ENOENT ở
+      # bước render). Bước này chỉ cài khi chưa có, có sẵn thì chỉ kiểm
+      # tra phiên bản rồi đi tiếp — không tốn thời gian cài lại.
+      - name: Cài ffmpeg (nếu máy chạy chưa có)
         run: |
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            echo "Chưa có ffmpeg — đang cài bằng apt..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          fi
           ffmpeg -version | head -1
           ffprobe -version | head -1
 
