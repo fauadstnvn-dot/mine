@@ -1,0 +1,544 @@
+# Game Video Render — bốc kịch bản ngẫu nhiên từ host, render từng frame,
+# ráp giọng ElevenLabs, xong thì chuyển kịch bản sang thư mục đã dùng.
+#
+# Luồng chạy:
+#   1. Bốc ngẫu nhiên 1 kịch bản .json trong thư mục kb_github trên host qua FTP.
+#   2. Bốc ngẫu nhiên 1 bản nhạc nền .mp3 trong thư mục nhac_nen trên host
+#      qua FTP (cùng cấp với play.php; nhạc dùng lại nhiều lần, KHÔNG bị
+#      chuyển đi như kịch bản).
+#   3. Render game offline từng frame theo thời gian ảo -> video chưa có tiếng.
+#   4. Tạo giọng từng câu bằng ElevenLabs (xoay key theo quota), đặt đúng mốc
+#      thời gian, trộn nhạc nền ở mức 20% (lặp tới hết video), mux vào video.
+#   5. Cắt đoạn hook (vài giây đoạn hay): câu thoại đánh dấu "hook": true,
+#      hoặc máy tự đoán (câu có "!" sau 25% video), cắt từ video chính.
+#   6. Tạo video Short dọc 1080x1920 từ đoạn hook (không có hook thì lấy
+#      15s đầu video chính): nền mờ + video gốc ở giữa, dưới 60s.
+#   7. Tạo intro (5s) + outro (8s) phong cách xếp khối, 4 kiểu bốc ngẫu
+#      nhiên (castle/village/battle/night); outro có đủ nút LIKE / SHARE /
+#      SUBSCRIBE. Bước này lỗi thì video vẫn đi tiếp nhưng không có
+#      intro/outro (không làm hỏng cả video).
+#   8. Tạo ảnh thumbnail tùy chỉnh 1280x720 JPG (dưới 2MB), 4 kiểu bốc
+#      ngẫu nhiên cùng kiểu với intro/outro, chữ hook to dễ đọc.
+#   9. Ghép intro + hook + video chính + outro thành video cuối. Đoạn nào
+#      thiếu thì bỏ qua đoạn đó; chapters tự cộng đúng độ dài các đoạn
+#      đã ghép thêm vào đầu (intro 5s, hook dài bao nhiêu cộng bấy nhiêu).
+#   10. Đăng video lên Artifacts.
+#   11. Đăng video lên YouTube (trừ khi yt_upload=false): tiêu đề/mô tả/tags
+#      lấy từ kịch bản (video_title/video_description/video_tags); token kênh
+#      lấy từ bảng tb_bao_secret cột token_mine, tự refresh khi hết hạn.
+#   12. Đăng thumbnail tùy chỉnh lên video vừa đăng (cần kênh đã xác minh
+#      số điện thoại — chưa xác minh thì bước này lỗi nhưng job vẫn đi
+#      tiếp, file thumb.jpg giữ lại trong Artifacts để đặt tay sau).
+#   13. Đăng Short cùng kênh với video chính (pin theo tài khoản trong
+#      sidecar, không bốc ngẫu nhiên sang kênh khác). Lỗi thì thôi.
+#   14. CHỈ KHI video đã đăng YouTube thành công mới chuyển kịch bản sang
+#      kb_github_exp, để lần sau không bốc lại nữa. Chạy thử với
+#      yt_upload=false thì kịch bản KHÔNG bị chuyển (để chạy thật sau).
+#   15. Dọn dẹp Artifacts sau khi đăng thành công (video chính luôn xóa;
+#      debug chỉ xóa khi thumbnail + Short đều đăng được, còn không thì
+#      giữ lại để tải thumb.jpg/short.mp4 về đăng tay).
+#
+# Vì sao không quay màn hình realtime: máy chủ GitHub không có GPU, quay
+# realtime sẽ giật. Render từng frame theo thời gian ảo thì mỗi khung hình
+# được vẽ đủ rồi mới chụp, nên ra video 2K mượt dù máy chủ chậm.
+#
+# Anh cần thêm vào GitHub TRƯỚC khi chạy (repo -> Settings -> Secrets and
+# variables -> Actions):
+#   Secrets (bắt buộc):
+#     FTP_HOST     - vd: ftp.lop2b.click (hoặc IP của host)
+#     FTP_USERNAME - tài khoản FTP của host
+#     FTP_PASSWORD - mật khẩu FTP của host
+#   PROJECT_URL (anh đã thêm rồi — để ở Secrets hay Variables đều được,
+#   workflow tự tìm cả 2 chỗ, nếu chưa có thì điền vào ô project_url lúc
+#   bấm Run cũng được):
+#     - link gốc tới dự án trên host, vd: https://lop2b.click/mine
+#     - workflow tự suy ra: game ở PROJECT_URL/play.php, file key ở
+#       PROJECT_URL/api.txt (file api.txt nằm cùng cấp với play.php trên
+#       host, mỗi dòng 1 API key ElevenLabs — không cần khai báo riêng
+#       link file key nữa).
+#   Đăng YouTube: KHÔNG cần thêm secret mới ngoài DB_NAME. Database dùng
+#   chung host/user/pass với FTP (DB_HOST = FTP_HOST, DB_USER =
+#   FTP_USERNAME, DB_PASS = FTP_PASSWORD), chỉ cần cho workflow biết tên
+#   database: điền ô db_name lúc bấm Run, hoặc thêm DB_NAME vào Secrets
+#   hay Variables (workflow tự tìm cả 2 chỗ). Bảng tb_bao_secret phải có
+#   sẵn: client_id, client_secret, token_mine (JSON: access_token,
+#   refresh_token, expires_in, saved_at, scope), num.
+#
+# Chống bốc trùng: workflow có concurrency group nên 2 lần chạy không bao
+# giờ chạy song song, không sợ 2 lần cùng bốc 1 kịch bản.
+
+name: Game Video Render
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_url:
+        description: "Link gốc tới dự án (để trống = dùng PROJECT_URL đã thêm vào GitHub)"
+        required: false
+        default: ""
+      fps:
+        description: "Số khung hình mỗi giây"
+        required: false
+        default: "30"
+      width:
+        description: "Chiều rộng video"
+        required: false
+        default: "2560"
+      height:
+        description: "Chiều cao video"
+        required: false
+        default: "1440"
+      max_frames:
+        description: "0 = chạy hết kịch bản; đặt 300 để chạy thử ~10 giây"
+        required: false
+        default: "0"
+      output:
+        description: "Tên video xuất ra (để trống = lấy theo tên kịch bản được bốc)"
+        required: false
+        default: ""
+      img_format:
+        description: "png (nét nhất) hoặc jpeg (nhanh, nhẹ hơn)"
+        required: false
+        default: "png"
+      script:
+        description: "Tên 1 kịch bản cụ thể (để trống = bốc ngẫu nhiên)"
+        required: false
+        default: ""
+      kb_dir:
+        description: "Thư mục kịch bản trên host (đường dẫn FTP)"
+        required: false
+        default: "kb_github"
+      kb_exp_dir:
+        description: "Thư mục chứa kịch bản đã dùng (đường dẫn FTP)"
+        required: false
+        default: "kb_github_exp"
+      music_dir:
+        description: "Thư mục nhạc nền trên host (đường dẫn FTP)"
+        required: false
+        default: "nhac_nen"
+      music:
+        description: "Tên 1 file nhạc cụ thể (để trống = bốc ngẫu nhiên)"
+        required: false
+        default: ""
+      music_volume:
+        description: "Âm lượng nhạc nền (0.2 = 20%)"
+        required: false
+        default: "0.2"
+      yt_upload:
+        description: "Đăng video lên YouTube sau khi render xong (false = chỉ chạy thử, kịch bản KHÔNG bị chuyển)"
+        required: false
+        default: "true"
+      yt_privacy:
+        description: "Chế độ công khai của video trên YouTube"
+        required: false
+        default: "public"
+        type: choice
+        options:
+          - public
+          - unlisted
+          - private
+      yt_category:
+        description: "ID danh mục YouTube (20 = Gaming)"
+        required: false
+        default: "20"
+      yt_made_for_kids:
+        description: "Đánh dấu video là dành cho trẻ em (true/false)"
+        required: false
+        default: "false"
+      yt_publish_at:
+        description: "Giờ phát hành theo giờ UTC, dạng HH:MM (để trống = đăng ngay; có giờ thì video lên private trước rồi tự public đúng giờ)"
+        required: false
+        default: ""
+      db_name:
+        description: "Tên database chứa bảng tb_bao_secret (để trống = dùng DB_NAME đã thêm vào GitHub)"
+        required: false
+        default: ""
+      db_port:
+        description: "Cổng MySQL"
+        required: false
+        default: "3306"
+      intro_outro:
+        description: "Tạo intro + outro phong cách xếp khối (false = tắt, video không có intro/outro)"
+        required: false
+        default: "true"
+      intro_style:
+        description: "Kiểu intro/outro cố định: castle, village, battle, night (để trống = bốc ngẫu nhiên mỗi lần chạy)"
+        required: false
+        default: ""
+      thumbnail:
+        description: "Tạo ảnh thumbnail tùy chỉnh 1280x720 (false = tắt, dùng thumbnail tự động của YouTube)"
+        required: false
+        default: "true"
+      short:
+        description: "Tạo và đăng video Short dọc 1080x1920 từ đoạn hook (false = tắt)"
+        required: false
+        default: "true"
+
+concurrency:
+  group: game-video-render
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    # contents: read cho bước checkout; actions: write cho bước dọn dẹp
+    # Artifacts cuối job (xóa artifact qua API cần quyền này). Đặt khối
+    # này là ghi đè toàn bộ quyền mặc định nên phải liệt kê đủ cả 2.
+    permissions:
+      contents: read
+      actions: write
+    timeout-minutes: 300
+    steps:
+      - name: Lấy code
+        uses: actions/checkout@v4
+
+      - name: Cài Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cài Python 3.12 (cho bước đăng YouTube)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cài Playwright + Chromium + FTP client
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install chromium --with-deps
+
+      - name: Kiểm tra ffmpeg
+        run: |
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Tính link game + link file key (api.txt cùng cấp với play.php)
+        run: |
+          PROJECT_URL="${{ inputs.project_url }}"
+          if [ -z "$PROJECT_URL" ]; then PROJECT_URL="${{ vars.PROJECT_URL }}"; fi
+          if [ -z "$PROJECT_URL" ]; then PROJECT_URL="${{ secrets.PROJECT_URL }}"; fi
+          if [ -z "$PROJECT_URL" ]; then PROJECT_URL="https://lop2b.click/mine"; fi
+          echo "GAME_URL=${PROJECT_URL%/}/play.php" >> "$GITHUB_ENV"
+          echo "KEYS_URL=${PROJECT_URL%/}/api.txt" >> "$GITHUB_ENV"
+          echo "Game URL: ${PROJECT_URL%/}/play.php"
+          echo "File key tự suy ra: ${PROJECT_URL%/}/api.txt"
+
+      - name: Bốc kịch bản từ host qua FTP (ngẫu nhiên, hoặc đúng file đã chỉ định)
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          KB_DIR: ${{ inputs.kb_dir }}
+          KB_EXP_DIR: ${{ inputs.kb_exp_dir }}
+        run: node pick_script.js --out picked_script.json --meta picked_meta.json --file "${{ inputs.script }}"
+
+      - name: Bốc nhạc nền từ host qua FTP (ngẫu nhiên, hoặc đúng file đã chỉ định)
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          MUSIC_DIR: ${{ inputs.music_dir }}
+        run: node pick_music.js --out picked_music.mp3 --meta picked_music_meta.json --file "${{ inputs.music }}"
+
+      - name: Đặt tên video theo kịch bản được bốc
+        run: |
+          OUT="${{ inputs.output }}"
+          if [ -z "$OUT" ]; then OUT="$(node -p "require('./picked_meta.json').file.replace(/\.json$/i, '')")"; fi
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+          echo "Tên video: $OUT.mp4"
+
+      - name: Render từng frame (chưa có tiếng)
+        env:
+          GAME_URL: ${{ env.GAME_URL }}
+          SCRIPT_PATH: picked_script.json
+          WIDTH: ${{ inputs.width }}
+          HEIGHT: ${{ inputs.height }}
+          FPS: ${{ inputs.fps }}
+          MAX_FRAMES: ${{ inputs.max_frames }}
+          IMG_FORMAT: ${{ inputs.img_format }}
+          OUT_VIDEO: video_silent.mp4
+          OUT_CAPTIONS: captions.json
+        run: node render.js
+
+      - name: Tải file txt API key từ host
+        run: |
+          curl -fsSL "$KEYS_URL" -o keys.txt
+          echo "Đã tải file key: $(grep -c . keys.txt) dòng"
+
+      - name: Tạo giọng + ráp vào video
+        run: |
+          SCRIPT_NAME="$(node -p "require('./picked_meta.json').file")"
+          node voice.js \
+            --script picked_script.json \
+            --script-name "$SCRIPT_NAME" \
+            --captions captions.json \
+            --keys keys.txt \
+            --video-in video_silent.mp4 \
+            --video-out "${OUT}.mp4" \
+            --music picked_music.mp3 \
+            --music-volume "${{ inputs.music_volume }}" \
+            --meta-out upload_meta.json
+
+      - name: Cắt đoạn hook (vài giây đoạn hay đặt sau intro)
+        run: |
+          HOOK="$(node -p "JSON.stringify(require('./upload_meta.json').hook || null)")"
+          if [ "$HOOK" != "null" ]; then
+            START="$(node -p "require('./upload_meta.json').hook.start")"
+            DUR="$(node -p "require('./upload_meta.json').hook.end - require('./upload_meta.json').hook.start")"
+            ffmpeg -y -v error -ss "$START" -i "${OUT}.mp4" -t "$DUR" -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k hook.mp4
+            node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('upload_meta.json','utf-8'));const d=m.hook.end-m.hook.start;if(Array.isArray(m.chapters)){m.chapters=m.chapters.map(c=>({t:c.t+d,title:c.title}));}fs.writeFileSync('upload_meta.json',JSON.stringify(m,null,2));console.log('Đã cộng '+d.toFixed(2)+'s (hook) vào chapters.');"
+            echo "Đã cắt hook: từ ${START}s, dài ${DUR}s."
+          else
+            echo "Không có hook (chưa đánh dấu và máy không đoán được) — bỏ qua, video không có đoạn teaser."
+          fi
+
+      # Short dọc: lấy từ đoạn hook (đoạn hay nhất, thường chỉ vài giây —
+      # rất hợp làm Short dưới 60s). Không có hook thì lấy 15s đầu video
+      # chính. Làm bằng filter ffmpeg: nền là video gốc phóng to + làm mờ,
+      # video gốc thu nhỏ đặt giữa, tiếng giữ nguyên. Bước này chạy TRƯỚC
+      # bước ghép nên "${OUT}.mp4" lúc này vẫn là video chính (chưa có
+      # intro/outro). Lỗi thì thôi (continue-on-error), chỉ mất Short.
+      - name: Tạo video Short dọc từ đoạn hook
+        if: ${{ inputs.short != 'false' }}
+        continue-on-error: true
+        run: |
+          SRC=""
+          if [ -f hook.mp4 ]; then
+            SRC="hook.mp4"
+            echo "Short lấy từ đoạn hook (đoạn hay nhất)."
+          elif [ -f "${OUT}.mp4" ]; then
+            SRC="${OUT}.mp4"
+            echo "Không có hook — Short lấy 15s đầu video chính."
+          fi
+          if [ -z "$SRC" ]; then echo "Không có nguồn làm Short — bỏ qua."; exit 0; fi
+          if [ "$SRC" = "${OUT}.mp4" ]; then
+            ffmpeg -y -v error -i "${OUT}.mp4" -t 15 -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k short_src.mp4
+            SRC="short_src.mp4"
+          fi
+          ffmpeg -y -v error -i "$SRC" -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];[0:v]scale=1080:1080:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v]" -map "[v]" -map 0:a -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k short.mp4
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('upload_meta.json','utf-8'));const s={title:m.title,description:(m.description||'')+'\n#Shorts',tags:m.tags||[]};fs.writeFileSync('short_meta.json',JSON.stringify(s,null,2));console.log('Đã tạo short_meta.json (cùng tiêu đề/tags, mô tả thêm #Shorts).');"
+          echo "Đã tạo short.mp4 (1080x1920, dọc)."
+
+      # Intro/outro là phần trang trí: lỗi thì job vẫn đi tiếp (nhờ
+      # continue-on-error), bước ghép sẽ giữ nguyên video chính. Script
+      # intro_outro.js cũng tự xóa cả 2 clip nếu lỗi giữa chừng để không
+      # ghép lẻ 1 clip làm lệch chapters.
+      - name: Tạo intro + outro phong cách xếp khối
+        if: ${{ inputs.intro_outro != 'false' }}
+        continue-on-error: true
+        run: |
+          node intro_outro.js \
+            --script picked_script.json \
+            --music picked_music.mp3 \
+            --width "${{ inputs.width }}" \
+            --height "${{ inputs.height }}" \
+            --fps "${{ inputs.fps }}" \
+            --meta-out upload_meta.json \
+            --intro intro.mp4 \
+            --outro outro.mp4 \
+            --style "${{ inputs.intro_style }}"
+
+      # Ảnh thumbnail tùy chỉnh: vẽ bằng cùng engine canvas với intro
+      # (không cần file ảnh ngoài), 4 kiểu cùng kiểu với intro/outro của
+      # video đó (bước intro đã lưu style vào upload_meta.json). Chỉ làm
+      # ảnh, không đụng vào video; lỗi thì thôi, chỉ mất ảnh.
+      - name: Tạo ảnh thumbnail tùy chỉnh
+        if: ${{ inputs.thumbnail != 'false' }}
+        continue-on-error: true
+        run: |
+          node intro_outro.js \
+            --script picked_script.json \
+            --meta-out upload_meta.json \
+            --thumbnail thumb.jpg \
+            --thumbnail-only
+
+      - name: Ghép intro + hook + video chính + outro
+        run: |
+          PARTS=()
+          [ -f intro.mp4 ] && PARTS+=(intro.mp4)
+          [ -f hook.mp4 ] && PARTS+=(hook.mp4)
+          PARTS+=("${OUT}.mp4")
+          [ -f outro.mp4 ] && PARTS+=(outro.mp4)
+          if [ "${#PARTS[@]}" -gt 1 ]; then
+            INPUT_ARGS=()
+            FILTER=""
+            N=0
+            for P in "${PARTS[@]}"; do
+              INPUT_ARGS+=(-i "$P")
+              FILTER+="[$N:v]fps=${{ inputs.fps }},scale=${{ inputs.width }}:${{ inputs.height }},format=yuv420p[v$N];[$N:a]aresample=48000,aformat=channel_layouts=stereo[a$N];"
+              N=$((N+1))
+            done
+            CONCAT=""
+            for ((i=0; i<N; i++)); do CONCAT="${CONCAT}[v$i][a$i]"; done
+            FILTER+="${CONCAT}concat=n=$N:v=1:a=1[v][a]"
+            ffmpeg -y -v error "${INPUT_ARGS[@]}" -filter_complex "$FILTER" -map "[v]" -map "[a]" -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k final_concat.mp4
+            mv final_concat.mp4 "${OUT}.mp4"
+            echo "Đã ghép ${N} đoạn: ${PARTS[*]}."
+          else
+            echo "Chỉ có video chính, không cần ghép."
+          fi
+
+      - name: Đăng video thành phẩm
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT }}
+          path: ${{ env.OUT }}.mp4
+          retention-days: 30
+
+      - name: Tính tên database (DB_NAME)
+        run: |
+          DB_NAME="${{ inputs.db_name }}"
+          if [ -z "$DB_NAME" ]; then DB_NAME="${{ vars.DB_NAME }}"; fi
+          if [ -z "$DB_NAME" ]; then DB_NAME="${{ secrets.DB_NAME }}"; fi
+          echo "DB_NAME=$DB_NAME" >> "$GITHUB_ENV"
+          if [ -z "$DB_NAME" ]; then echo "Chưa có DB_NAME — bước đăng YouTube sẽ báo lỗi và dừng lại (video vẫn nằm trong Artifacts)"; fi
+
+      # Token kênh lấy từ bảng tb_bao_secret cột token_mine (giống logic
+      # publish.py của tour-main, chỉ khác tên cột). Database dùng chung
+      # host/user/pass với FTP nên không cần thêm secret mới.
+      - name: Đăng video lên YouTube
+        id: upload_yt
+        if: ${{ inputs.yt_upload != 'false' }}
+        env:
+          DB_HOST: ${{ secrets.FTP_HOST }}
+          DB_USER: ${{ secrets.FTP_USERNAME }}
+          DB_PASS: ${{ secrets.FTP_PASSWORD }}
+          DB_PORT: ${{ inputs.db_port }}
+          DB_NAME: ${{ env.DB_NAME }}
+        run: |
+          pip install --quiet pymysql requests
+          KIDS=""
+          if [ "${{ inputs.yt_made_for_kids }}" = "true" ]; then KIDS="--made-for-kids"; fi
+          python upload_youtube.py \
+            --video "${OUT}.mp4" \
+            --meta upload_meta.json \
+            --privacy "${{ inputs.yt_privacy }}" \
+            --category "${{ inputs.yt_category }}" \
+            --publish-at "${{ inputs.yt_publish_at }}" \
+            $KIDS
+
+      # Đặt thumbnail tùy chỉnh lên video vừa đăng. YouTube chỉ cho đặt
+      # khi kênh đã xác minh số điện thoại — kênh chưa xác minh sẽ bị 403,
+      # bước này lỗi nhưng job vẫn đi tiếp (continue-on-error) và file
+      # thumb.jpg được giữ lại trong Artifacts (nhờ bước dọn dẹp giữ lại
+      # debug khi bước này lỗi) để xác minh xong thì đặt tay trong Studio.
+      - name: Đăng thumbnail tùy chỉnh (cần kênh đã xác minh, lỗi thì thôi)
+        id: upload_thumb
+        if: ${{ inputs.thumbnail != 'false' }}
+        continue-on-error: true
+        env:
+          DB_HOST: ${{ secrets.FTP_HOST }}
+          DB_USER: ${{ secrets.FTP_USERNAME }}
+          DB_PASS: ${{ secrets.FTP_PASSWORD }}
+          DB_PORT: ${{ inputs.db_port }}
+          DB_NAME: ${{ env.DB_NAME }}
+        run: |
+          if [ ! -f thumb.jpg ]; then echo "Không có file thumb.jpg — bỏ qua."; exit 0; fi
+          if [ ! -f "${OUT}.youtube.json" ]; then echo "Không có sidecar video chính — bỏ qua."; exit 0; fi
+          python upload_youtube.py --set-thumbnail --sidecar "${OUT}.youtube.json" --image thumb.jpg
+
+      # Đăng Short cùng kênh với video chính (pin theo client_id trong
+      # sidecar, không bốc ngẫu nhiên sang kênh khác). Lỗi thì thôi
+      # (continue-on-error), file short.mp4 giữ lại trong Artifacts.
+      - name: Đăng video Short lên YouTube (cùng kênh với video chính)
+        id: upload_short
+        if: ${{ inputs.short != 'false' }}
+        continue-on-error: true
+        env:
+          DB_HOST: ${{ secrets.FTP_HOST }}
+          DB_USER: ${{ secrets.FTP_USERNAME }}
+          DB_PASS: ${{ secrets.FTP_PASSWORD }}
+          DB_PORT: ${{ inputs.db_port }}
+          DB_NAME: ${{ env.DB_NAME }}
+        run: |
+          if [ ! -f short.mp4 ] || [ ! -f short_meta.json ]; then echo "Không có file Short — bỏ qua."; exit 0; fi
+          if [ ! -f "${OUT}.youtube.json" ]; then echo "Không có sidecar video chính — bỏ qua Short để khỏi đăng nhầm kênh."; exit 0; fi
+          PIN="$(node -p "require('./${OUT}.youtube.json').client_id" 2>/dev/null || true)"
+          if [ -z "$PIN" ]; then echo "Không xác định được kênh video chính — bỏ qua Short để khỏi đăng nhầm kênh."; exit 0; fi
+          KIDS=""
+          if [ "${{ inputs.yt_made_for_kids }}" = "true" ]; then KIDS="--made-for-kids"; fi
+          python upload_youtube.py --video short.mp4 --meta short_meta.json --pin-account "$PIN" \
+            --privacy "${{ inputs.yt_privacy }}" --category "${{ inputs.yt_category }}" \
+            --publish-at "${{ inputs.yt_publish_at }}" $KIDS
+
+      - name: Đăng file debug (mốc caption + bảng giọng + meta đăng YouTube)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT }}-debug
+          path: |
+            captions.json
+            picked_meta.json
+            picked_music_meta.json
+            upload_meta.json
+            intro.mp4
+            hook.mp4
+            outro.mp4
+            thumb.jpg
+            short.mp4
+            short_meta.json
+            ${{ env.OUT }}.youtube.json
+            short.youtube.json
+            voice_work/voice_plan.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # Chỉ chạy khi video đã đăng YouTube thành công: nếu đăng lỗi thì
+      # kịch bản ở lại kb_github để chạy lại sau, còn video vẫn nằm trong
+      # Artifacts để đăng tay nếu cần. Chạy thử với yt_upload=false thì
+      # bước này cũng không chạy (kịch bản không bị chuyển oan).
+      - name: Chuyển kịch bản sang kb_github_exp
+        if: ${{ success() && inputs.yt_upload != 'false' }}
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          KB_DIR: ${{ inputs.kb_dir }}
+          KB_EXP_DIR: ${{ inputs.kb_exp_dir }}
+        run: node pick_script.js --move --meta picked_meta.json
+
+      # Dọn dẹp sau khi video đã lên YouTube thành công: video chính luôn
+      # xóa (đã nằm trên YouTube); artifact debug chỉ xóa khi thumbnail +
+      # Short đều đăng được — nếu 1 trong 2 lỗi thì GIỮ LẠI debug để anh
+      # tải thumb.jpg/short.mp4 về đăng tay sau khi xác minh kênh
+      # (KEEP_DEBUG lấy từ outcome của 2 bước đăng đó: bước bị bỏ qua thì
+      # outcome là 'skipped', không tính là lỗi). Điều kiện bước vẫn chỉ
+      # kiểm tra bước đăng video chính (chạy thử giữ nguyên Artifacts để
+      # anh tải về xem; đăng chính lỗi cũng giữ nguyên để đăng tay).
+      # GitHub tự ngầm thêm success() vào điều kiện nên bước trước đó mà
+      # lỗi nặng thì bước này cũng không chạy — an toàn. Lỗi xóa không
+      # làm hỏng job (continue-on-error + từng lệnh xóa đều có nhánh cảnh
+      # báo). gh CLI có sẵn trên máy chạy của GitHub.
+      - name: Dọn dẹp Artifacts sau khi đã đăng YouTube thành công
+        if: ${{ steps.upload_yt.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_DEBUG: ${{ steps.upload_thumb.outcome == 'failure' || steps.upload_short.outcome == 'failure' }}
+        run: |
+          REPO="${{ github.repository }}"
+          RUN_ID="${{ github.run_id }}"
+          LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | "\(.id) \(.name)"' 2>/dev/null || true)"
+          if [ -z "$LIST" ]; then
+            echo "Không liệt kê được artifact nào (hoặc không có artifact) — kiểm tra quyền actions: write của job nếu Artifacts vẫn còn."
+          else
+            echo "$LIST" | while read -r ID NAME; do
+              if [ "$KEEP_DEBUG" = "true" ] && [ "$NAME" = "${OUT}-debug" ]; then
+                echo "Giữ lại artifact debug ($NAME) vì thumbnail/Short chưa đăng được — tải thumb.jpg/short.mp4 về đăng tay sau khi xác minh."
+                continue
+              fi
+              echo "Đang xóa artifact $ID ($NAME)..."
+              gh api -X DELETE "repos/$REPO/actions/artifacts/$ID" >/dev/null 2>&1 \
+                && echo "  Đã xóa artifact $ID." \
+                || echo "  (cảnh báo) không xóa được artifact $ID, để lại cho hết hạn tự động."
+            done
+          fi
+          # Xóa luôn file tạo ra trong lần chạy này trên máy chạy (chủ yếu
+          # là dọn cho sạch; dung lượng GitHub thật sự tiết kiệm được là
+          # nhờ xóa Artifacts ở trên, vì máy chạy vốn tự giải phóng khi
+          # job kết thúc).
+          rm -rf voice_work intro_silent.mp4 outro_silent.mp4 intro.mp4 hook.mp4 outro.mp4 \
+            thumb.jpg short.mp4 short_src.mp4 short_meta.json short.youtube.json \
+            "${OUT}.mp4" captions.json picked_meta.json picked_music_meta.json \
+            upload_meta.json "${OUT}.youtube.json" picked_script.json picked_music.mp3
+          echo "Đã dọn dẹp xong."

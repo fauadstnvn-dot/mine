@@ -1,0 +1,396 @@
+HƯỚNG DẪN — RENDER VIDEO GAME TỰ ĐỘNG TRÊN GITHUB (bản kb_github)
+====================================================================
+
+Bộ này làm gì?
+  1. Bốc NGẪU NHIÊN 1 kịch bản .json trong thư mục kb_github trên host
+     của anh qua FTP.
+  2. Bốc NGẪU NHIÊN 1 bản nhạc nền .mp3 trong thư mục nhac_nen trên host
+     qua FTP (cùng cấp với play.php). Nhạc dùng lại nhiều lần, KHÔNG bị
+     chuyển đi như kịch bản.
+  3. Mở game bằng trình duyệt không giao diện trên GitHub Actions, chạy
+     kịch bản theo thời gian ảo (mỗi bước đúng 1/FPS giây), chụp từng
+     khung hình rồi ghép thành video 2K bằng ffmpeg. Không cần quay màn
+     hình realtime nên máy chủ không có GPU vẫn ra video mượt.
+  4. Tạo giọng từng câu thoại bằng ElevenLabs (giọng Antoni, đổi cao độ
+     theo từng vai), đặt đúng mốc thời gian bắt được lúc render, trộn
+     nhạc nền ở mức 20% (tự lặp lại tới hết video), rồi gắn vào video.
+  5. Cắt đoạn hook (teaser vài giây đoạn hay) từ video chính rồi đặt
+     ngay sau intro (xem mục "Intro, hook và outro" bên dưới).
+  6. Tạo video Short dọc 1080x1920 từ đoạn hook (không có hook thì lấy
+     15s đầu video chính): nền mờ + video gốc ở giữa, tiếng giữ nguyên.
+  7. Tạo intro (5 giây) + outro (8 giây) phong cách game xếp khối, 4
+     kiểu bốc ngẫu nhiên mỗi lần chạy; outro có đủ 3 nút kêu gọi LIKE /
+     SHARE / SUBSCRIBE. Lỗi ở bước này không làm hỏng video: video vẫn
+     đi tiếp nhưng không có intro/outro.
+  8. Tạo ảnh thumbnail tùy chỉnh 1280x720 JPG (dưới 2MB), 4 kiểu bốc
+     ngẫu nhiên cùng kiểu với intro/outro, chữ hook to dễ đọc (xem mục
+     "Thumbnail tùy chỉnh + video Short" bên dưới).
+  9. Ghép intro + hook + video chính + outro thành video cuối. Đoạn nào
+     thiếu thì bỏ qua đoạn đó; các mốc chapter trong mô tả tự cộng thêm
+     đúng độ dài các đoạn đã ghép vào đầu nên không bị lệch mốc.
+  10. Đăng video lên Artifacts.
+  11. Đăng video lên YouTube (trừ khi chạy thử với yt_upload=false):
+     tiêu đề/mô tả/tags lấy từ kịch bản (video_title/video_description/
+     video_tags); các mốc phân cảnh (chapter) lấy từ trường chapter gắn
+     vào câu thoại mở đầu mỗi phân cảnh, thời gian lấy đúng từ mốc
+     caption của câu đó nên luôn khớp video; mô tả sẽ có thêm khối
+     "Timestamps:" trước dòng hashtag cuối. Token kênh lấy từ bảng
+     tb_bao_secret cột token_mine, tự refresh khi hết hạn, mỗi tài khoản
+     đăng tối đa 9 video rồi tự reset lượt (giống logic publish.py của
+     dự án tour-main).
+  12. Đăng thumbnail tùy chỉnh lên video vừa đăng. YouTube chỉ cho đặt
+     thumbnail tùy chỉnh khi kênh đã xác minh số điện thoại — kênh chưa
+     xác minh sẽ bị lỗi 403, bước này lỗi nhưng job vẫn đi tiếp, file
+     thumb.jpg giữ lại trong Artifacts để xác minh xong thì đặt tay
+     trong YouTube Studio.
+  13. Đăng Short cùng kênh với video chính (pin theo tài khoản đã đăng
+     video chính, không bốc ngẫu nhiên sang kênh khác). Lỗi thì thôi.
+  14. CHỈ KHI video đã đăng YouTube thành công mới chuyển kịch bản đó
+     sang thư mục kb_github_exp, để lần sau không bốc lại nữa. Đăng lỗi
+     thì kịch bản ở lại kb_github để chạy lại sau, còn video vẫn nằm
+     trong Artifacts để đăng tay nếu cần.
+  15. Sau khi đăng YouTube thành công, workflow tự xóa Artifacts để đỡ
+     tốn dung lượng GitHub: video chính luôn xóa; artifact debug chỉ
+     xóa khi thumbnail + Short đều đăng được, còn 1 trong 2 lỗi thì
+     GIỮ LẠI debug để anh tải thumb.jpg/short.mp4 về đăng tay. Đăng lỗi
+     hoặc chạy thử (yt_upload=false) thì giữ nguyên tất cả Artifacts;
+     các Artifacts giữ lại này tự hết hạn sau 30 ngày. Lưu ý: file trên
+     máy chạy vốn tự mất khi job kết thúc nên không tốn dung lượng
+     GitHub — thứ tốn dung lượng thật là Artifacts, và bước dọn dẹp này
+     xóa đúng chỗ đó.
+
+File trong bộ này:
+  pick_script.js  - Bốc/chuyển kịch bản qua FTP (ngẫu nhiên hoặc 1 file cụ thể)
+  pick_music.js   - Bốc nhạc nền .mp3 qua FTP (ngẫu nhiên hoặc 1 file cụ thể;
+                    nhạc dùng lại, không chuyển đi)
+  render.js       - Driver Playwright: chạy game, chụp từng frame, bắt mốc caption
+  voice.js        - Chia câu theo quota key, tạo TTS, đổi pitch, ráp tiếng vào video;
+                    tính luôn cửa sổ đoạn hook (xem mục bên dưới)
+  intro_outro.js  - Vẽ intro (5s) + outro (8s) + thumbnail (1280x720 JPG)
+                    phong cách xếp khối bằng canvas (intro/outro 4 kiểu:
+                    castle/village/battle/night; thumbnail 4 kiểu:
+                    castle/face/battle/night, cùng kiểu với intro/outro);
+                    outro có nút LIKE / SHARE / SUBSCRIBE; tự cộng 5s vào
+                    chapters khi đủ cả 2 clip; chế độ --thumbnail-only chỉ
+                    làm ảnh (không cần chạy intro/outro trước)
+  upload_youtube.py - Đăng video lên YouTube: lấy token từ bảng tb_bao_secret
+                    cột token_mine (tự refresh khi hết hạn), upload dạng
+                    resumable, tiêu đề/mô tả/tags từ upload_meta.json;
+                    sau khi đăng xong ghi video_id/link/client_id vào
+                    sidecar <video>.youtube.json; --pin-account để Short
+                    đăng cùng kênh với video chính; --set-thumbnail để
+                    đặt ảnh thumbnail tùy chỉnh (không tăng num)
+  package.json    - Khai báo thư viện (playwright, basic-ftp)
+  binance_godzilla_v15_voice_pitch.json - Kịch bản mẫu gốc (tiếng Việt, chỉ
+                    để tham khảo cấu trúc; KHÔNG có trong gói zip mới — gói
+                    mới chỉ giữ bản tiếng Anh để khỏi nhầm file)
+  binance_godzilla_v15_voice_pitch_en.json - Kịch bản mẫu TIẾNG ANH (đã dịch
+                    toàn bộ 102 bước, giữ nguyên id/tọa độ/pitch, có sẵn
+                    video_title/video_description/video_tags + 9 mốc
+                    chapter + 1 câu hook đã đánh dấu + câu thumbnail_text
+                    "GODZILLA WANTS CAKE!") — anh up file này vào kb_github
+                    là chạy được ngay, tên _en mới nên không lo cache file
+                    cũ; lấy file này làm mẫu cho các kịch bản sau
+  .github/workflows/game-video.yml - Workflow GitHub Actions
+
+Intro, hook và outro (video cuối có dạng: intro 5s -> hook vài giây
+-> video chính -> outro 8s):
+  Intro: nền game xếp khối vẽ bằng code (không cần file ảnh/font ngoài),
+  chữ kênh BLOCKY TALES rơi/nảy/trượt/đập xuống tùy kiểu, rồi hiện tên
+  tập phim. 4 kiểu, mỗi lần chạy bốc ngẫu nhiên 1 kiểu:
+    castle  - ban ngày, các khối rơi xuống xếp thành tháp, chữ rơi nảy
+    village - làng quê, nhà mọc lên, nhân vật đi bộ vào, chữ trượt ngang
+    battle  - hoàng hôn rực, khối bay vào dựng tường thành, chữ đập mạnh
+    night   - ban đêm, sao nhấp nháy, khối bay lên nhẹ, chữ hiện dần
+  Muốn cố định 1 kiểu thì lúc chạy workflow điền ô intro_style
+  (castle/village/battle/night); để trống là ngẫu nhiên. Muốn tắt hẳn
+  intro/outro thì điền ô intro_outro = false.
+  Hook (đoạn hay đặt sau intro): là vài giây lấy từ chính video, cắt
+  quanh 1 câu thoại (từ 0.5s trước câu đến 0.3s sau câu kế tiếp) rồi đặt
+  ngay sau intro, trước khi video chính bắt đầu. Người xem thấy ngay
+  đoạn gây tò mò nhất nên dễ ở lại xem tiếp, dù đoạn đó lát nữa sẽ lặp
+  lại trong video chính (đây là cách làm hook teaser quen thuộc).
+  Làm sao biết đoạn nào hay? Đáng tin nhất là chính anh đánh dấu, vì
+  chỉ người viết kịch bản mới biết đoạn nào đắt nhất. Tiêu chí chọn:
+  câu khiến người xem thắc mắc "rồi sao nữa?" (nhân vật phản diện đòi
+  hỏi, cú twist, bí mật bị lộ), hoặc câu buồn cười nhất (punchline),
+  hoặc câu kịch tính nhất (trước trận đánh lớn). Ví dụ trong kịch bản
+  mẫu: câu Godzilla gầm lên đòi "Big Nommy Buns" — vừa lạ, vừa buồn
+  cười, vừa khiến người xem muốn biết nó có được bánh không.
+  Cách đánh dấu: gắn "hook": true vào đúng 1 câu say/talk, hoặc vào
+  đúng 1 dòng dialogue (giống cách gắn chapter). Game bỏ qua trường
+  này nên kịch bản vẫn chạy bình thường.
+  Nếu không có câu nào được đánh dấu thì máy tự đoán: câu thoại đầu
+  tiên của nhân vật (không phải lời dẫn) có dấu "!" và nằm sau 25%
+  video — thường là câu đòi hỏi, hăm dọa hay cao trào. Log của bước
+  tạo giọng sẽ ghi rõ hook là "đã đánh dấu" hay "máy tự chọn" để anh
+  kiểm tra; đánh dấu tay luôn chắc hơn máy đoán.
+  Outro: nền hoàng hôn/ban đêm tùy kiểu, nhân vật vẫy tay, dòng chữ
+  cảm ơn, và hàng 3 nút kêu gọi: LIKE (xanh dương) / SHARE (xanh lá) /
+  SUBSCRIBE (đỏ, nhấp nháy nhẹ) + chuông, rồi mờ dần sang đen.
+  Muốn xem thử intro/hook/outro của lần chạy đầu tiên thì tải file
+  debug trong Artifacts: intro.mp4, hook.mp4, outro.mp4 nằm kèm trong
+  đó (kèm captions.json, upload_meta.json...). Muốn đổi chữ kênh,
+  slogan, độ dài intro/outro hay mức nhạc nền của riêng 2 clip này thì
+  sửa các hằng số ở đầu file intro_outro.js (CHANNEL, TAGLINE,
+  INTRO_SECS, OUTRO_SECS, MUSIC_VOL).
+
+Thumbnail tùy chỉnh + video Short:
+  Thumbnail (ảnh đại diện): vẽ bằng cùng engine canvas với intro, kích
+  thước 1280x720 JPG dưới 2MB (chuẩn YouTube). 4 kiểu, dùng cùng kiểu
+  với intro/outro của video đó (village dùng chung kiểu castle) để video
+  đồng bộ; mỗi lần chạy kiểu đã bốc ngẫu nhiên nên các video vẫn khác
+  nhau. Cả 4 kiểu đều làm theo 1 nguyên tắc thu hút: chữ hook THẬT TO
+  (không dùng tên tập dài vì chữ sẽ bé tí không đọc được), màu chữ
+  tương phản mạnh với nền, và nhân vật to/rõ:
+    castle - nền ngày tươi sáng, chữ vàng + nhân vật to bên trái + tháp
+             khối bên phải
+    face   - mặt nhân vật PHÓNG TO ngạc nhiên bên trái + chữ trắng bên
+             phải (mặt người là thứ mắt người xem dừng lại đầu tiên)
+    battle - nền hoàng hôn rực + dải chữ vàng trên nền tối (kịch tính)
+    night  - nền đêm + sao + chữ vàng nhạt phát sáng + nhân vật cầm đèn
+  Chữ trên thumbnail lấy từ trường video_thumbnail_text của kịch bản:
+  anh ghi 1 câu hook NGẮN GỌN, gây tò mò (câu phản diện đòi hỏi, cú
+  twist, hoặc punchline buồn cười nhất — ví dụ "GODZILLA WANTS CAKE!").
+  Không có trường này thì thumbnail dùng tên tập (chữ nhỏ hơn, có thể
+  bị cắt bớt). Muốn tắt thumbnail thì điền ô thumbnail = false lúc chạy.
+  QUAN TRỌNG — xác minh kênh: YouTube chỉ cho đặt thumbnail tùy chỉnh
+  khi kênh đã xác minh số điện thoại. Kênh chưa xác minh thì bước đăng
+  thumbnail sẽ bị lỗi 403, nhưng job KHÔNG hỏng theo (bước này lỗi thì
+  thôi): file thumb.jpg vẫn nằm trong Artifacts (debug) để anh tải về,
+  xác minh kênh xong thì vào YouTube Studio đặt tay cho video đó. Các
+  lần chạy sau khi đã xác minh thì thumbnail sẽ tự đăng được bình thường.
+  Video Short: dọc 1080x1920, lấy từ đoạn hook (đoạn hay nhất, thường
+  chỉ vài giây nên luôn dưới 60s — đúng chuẩn Short). Không có hook thì
+  lấy 15s đầu video chính. Hình thức: nền là video gốc phóng to + làm
+  mờ, video gốc thu nhỏ đặt giữa, tiếng giữ nguyên. Tiêu đề/tags giống
+  video chính, mô tả thêm #Shorts. Short được đăng CÙNG KÊNH với video
+  chính (pin theo tài khoản trong sidecar, không bốc ngẫu nhiên sang
+  kênh khác); nếu tài khoản đó đã đủ 9 lượt thì tự reset về 0 thay vì
+  đổi kênh. Đăng Short lỗi thì thôi (job vẫn đi tiếp), file short.mp4
+  giữ lại trong Artifacts để đăng tay. Muốn tắt Short thì điền ô
+  short = false lúc chạy. Lưu ý: Short dài quá 60s sẽ không còn tính là
+  Short nữa (YouTube xếp thành video dọc thường) — nhưng hook thường
+  chỉ là 1 câu thoại nên thực tế luôn dưới 60s.
+
+Cài đặt 1 lần:
+  A. Trên host của anh:
+     - Tạo thư mục kb_github (chứa các kịch bản .json sẽ làm video).
+       Thư mục kb_github_exp không cần tạo trước, workflow tự tạo khi
+       chuyển file lần đầu (tài khoản FTP phải có quyền ghi).
+     - Tạo thư mục nhac_nen CÙNG CẤP với play.php, bỏ các file nhạc nền
+       .mp3 vào đó. Mỗi lần chạy workflow bốc ngẫu nhiên 1 file trong đó
+       làm nhạc nền (mức 20%, tự lặp tới hết video). Nhạc dùng lại nhiều
+       lần, workflow KHÔNG chuyển file nhạc đi đâu cả.
+     - File api.txt nằm CÙNG CẤP với play.php, chứa API key ElevenLabs,
+       mỗi dòng 1 key, không thêm gì khác. Workflow tự suy ra link file
+       này từ PROJECT_URL (PROJECT_URL/api.txt) nên không cần khai báo
+       riêng. Lưu ý: ai có đường link file này đều dùng được key, nên
+       đừng đăng link công khai.
+     - play.php trên host phải là bản có hàm kbRun (nên dùng play2-17 trở
+       lên; kịch bản v15 cần tối thiểu play2-16).
+     - Bảng tb_bao_secret trong database của anh phải có sẵn các cột:
+       client_id, client_secret, token_mine, num. Cột token_mine chứa
+       JSON dạng {"access_token": "...", "refresh_token": "...",
+       "expires_in": 3600, "saved_at": 1234567890, "scope": "..."} —
+       đúng kiểu token mà dự án tour-main lưu ở cột token_arena, chỉ
+       khác tên cột. Token hết hạn thì workflow tự refresh bằng
+       client_id/client_secret rồi ghi đè token mới vào đúng cột đó.
+     - Kịch bản trong kb_github toàn bộ bằng tiếng Anh (pipeline xử lý
+       tiếng Anh bình thường: giọng Antoni, model eleven_multilingual_v2).
+       File mẫu tiếng Anh đi kèm là
+       binance_godzilla_v15_voice_pitch_en.json (bản dịch đầy đủ của v15,
+       trò đùa BNB được dịch thành "Big Nommy Buns" để giữ nguyên viết
+       tắt B-N-B).
+  B. Trên GitHub (repo -> Settings -> Secrets and variables -> Actions):
+     - Secrets (bắt buộc, 3 cái — ANH ĐIỀN GIÁ TRỊ):
+         FTP_HOST     - vd: ftp.lop2b.click (hoặc IP của host)
+         FTP_USERNAME - tài khoản FTP của host
+         FTP_PASSWORD - mật khẩu FTP của host
+       (Workflow chỉ đọc 3 secret này qua secrets.FTP_*, không ghi mật khẩu
+       vào code hay log. Trong log, key ElevenLabs cũng chỉ hiện 4 ký tự
+       đầu và cuối để nhận biết.)
+     - PROJECT_URL (anh đã thêm rồi — để ở Secrets hay Variables đều được,
+       workflow tự tìm cả 2 chỗ): link gốc tới dự án, vd:
+       https://lop2b.click/mine. Workflow tự suy ra game ở
+       PROJECT_URL/play.php và file key ở PROJECT_URL/api.txt.
+       Nếu chưa đặt thì điền thẳng vào ô project_url lúc bấm Run workflow
+       cũng được (ô nhập sẽ thắng giá trị đã thêm).
+     - DB_NAME (tên database chứa bảng tb_bao_secret): KHÔNG cần thêm
+       secret mới cho host/user/pass vì database dùng chung host/user/
+       pass với FTP (workflow tự lấy DB_HOST = FTP_HOST, DB_USER =
+       FTP_USERNAME, DB_PASS = FTP_PASSWORD). Chỉ cần cho workflow biết
+       tên database: điền ô db_name lúc bấm Run, hoặc thêm DB_NAME vào
+       Secrets hay Variables (workflow tự tìm cả 2 chỗ, ô nhập thắng).
+       Cổng MySQL mặc định 3306, đổi bằng ô db_port nếu khác.
+     - Lưu ý đường dẫn FTP: KB_DIR mặc định là kb_github, tính từ thư mục
+       gốc khi đăng nhập FTP. Nếu host của anh chứa web ở sâu hơn, vd
+       public_html/mine, thì lúc chạy điền kb_dir = public_html/mine/kb_github
+       và kb_exp_dir = public_html/mine/kb_github_exp.
+       Thư mục nhạc cũng theo đúng quy tắc này: music_dir mặc định là
+       nhac_nen; nếu web ở public_html/mine thì điền
+       music_dir = public_html/mine/nhac_nen.
+  C. Đưa code lên GitHub:
+     - Copy toàn bộ file trong bộ này vào THƯ MỤC GỐC của repo, giữ nguyên
+       cấu trúc .github/workflows/game-video.yml, rồi commit + push.
+
+Chạy lần đầu (CHẠY THỬ, quan trọng):
+  1. Vào repo -> tab Actions -> chọn workflow "Game Video Render"
+     -> Run workflow.
+  2. Điền:
+       project_url : để trống nếu đã thêm PROJECT_URL vào GitHub
+       fps         : 30
+       width       : 2560
+       height      : 1440
+       max_frames  : 300        <-- chạy thử chỉ ~10 giây video
+       output      : để trống (tên video sẽ lấy theo tên kịch bản được bốc)
+       script      : để trống (bốc ngẫu nhiên) — hoặc ghi đúng tên file
+                     .json trong kb_github nếu muốn chạy 1 kịch bản cụ thể
+       music_dir   : nhac_nen (đổi nếu web nằm sâu hơn, xem mục B)
+       music       : để trống (bốc ngẫu nhiên) — hoặc ghi đúng tên file
+                     .mp3 trong nhac_nen nếu muốn 1 bản cụ thể
+       music_volume: 0.2 (20%; tăng/giảm nếu muốn nhạc to/nhỏ hơn)
+       yt_upload   : false      <-- CHẠY THỬ thì tắt đăng YouTube đi,
+                     nếu không video thử ~10 giây cũng bị đăng lên kênh
+                     thật. Tắt đăng thì kịch bản cũng KHÔNG bị chuyển
+                     sang kb_github_exp, để chạy thật sau.
+       db_name     : tên database chứa bảng tb_bao_secret (để trống nếu
+                     đã thêm DB_NAME vào GitHub)
+  3. Đợi job chạy xong, tải file ở mục Artifacts về xem:
+       - Hình có đúng cảnh game không, có bị màn hình chờ che không
+       - Log dòng "Bốc ngẫu nhiên được:" để biết đã bốc đúng file chưa
+       - Tốc độ render bao nhiêu frame/giây (xem log dòng "Đã render...")
+       Từ đó ước lượng thời gian cho video dài.
+  4. Nếu thử ngon thì chạy thật với max_frames = 0 (chạy hết kịch bản).
+
+Chạy thật:
+  Như trên nhưng max_frames = 0 và yt_upload = true (mặc định). Video
+  ~7 phút ở 30fps = khoảng 12.600 frame. Chạy xong video tự đăng lên
+  YouTube, log sẽ in link dạng https://youtu.be/... và kịch bản mới bị
+  chuyển sang kb_github_exp.
+  Chống bốc trùng: workflow có concurrency group nên 2 lần chạy không bao
+  giờ chạy song song, không sợ 2 lần cùng bốc 1 kịch bản.
+
+Kịch bản cần có gì? (để đăng YouTube)
+  Trong file JSON kịch bản, ngoài name/description/steps/world như cũ, anh
+  thêm 2 trường:
+     "video_title": "Tiêu đề video đăng YouTube",
+     "video_description": "Mô tả video đăng YouTube (nhiều dòng, hashtag...)"
+  Dùng tên riêng video_title/video_description để không đụng với
+  name/description mà game đang dùng hiển thị trong danh sách kịch bản.
+  Workflow sẽ ghi 2 trường này (kèm tên video và tên file kịch bản) vào
+  file upload_meta.json, rồi bước đăng YouTube đọc file đó — không cần
+  gõ lại tiêu đề/mô tả.
+  Nếu kịch bản chưa có 2 trường này thì video vẫn làm bình thường, chỉ là
+  upload_meta.json sẽ lấy tạm name/description, hoặc để trống.
+  Tùy chọn thêm: trường "video_tags" (mảng chuỗi, mỗi tag tối đa 30 ký
+  tự, vd ["blocky tales", "gaming"]) để gắn tag cho video. YouTube tự
+  giới hạn tổng tag 450 ký tự, tag thừa sẽ bị bỏ. Không có video_tags
+  thì video đăng lên không có tag, vẫn xem bình thường.
+  File mẫu tiếng Anh đi kèm (binance_godzilla_v15_voice_pitch_en.json)
+  đã có sẵn video_tags (15 tag) để anh lấy làm mẫu.
+
+  Mốc thời gian các phân cảnh (chapter) trong mô tả:
+  Anh KHÔNG cần ghi số giây tay — số giây phụ thuộc lúc render, pipeline
+  tự đo. Cách làm: gắn thêm trường "chapter" (tên phân cảnh, vd
+  "The Battle for the Coins") vào câu thoại MỞ ĐẦU phân cảnh đó:
+     - bước say/talk: thêm "chapter": "Tên phân cảnh" vào cùng bước đó;
+     - bước dialogue: thêm "chapter" vào đúng DÒNG mở đầu phân cảnh
+       (không phải cả bước dialogue, vì 1 bước dialogue có nhiều dòng).
+  Pipeline lấy mốc caption của chính câu đó làm thời gian bắt đầu
+  chapter, nên chapter luôn khớp video dù đoạn bay/đánh nhau dài ngắn
+  khác nhau mỗi lần chạy. Khi đăng, mô tả sẽ có thêm khối (trước dòng
+  hashtag cuối):
+     Timestamps:
+     0:00 Waking Up in the Castle
+     2:15 Touring the Estate
+     ...
+  Quy tắc (giống YouTube và giống tour-main): chỉ hiện khối khi có từ
+  3 mốc trở lên; các mốc phải cách nhau tối thiểu 10 giây (mốc nào gần
+  quá sẽ bị bỏ, riêng mốc thứ 2 gần mốc đầu sẽ gộp tên vào mốc đầu);
+  mốc đầu tiên luôn dồn về 0:00; tên chapter tối đa 90 ký tự. Kịch bản
+  không có chapter thì mô tả đăng lên bình thường, không có khối này.
+  File mẫu tiếng Anh đã đánh dấu sẵn 9 phân cảnh (lâu đài buổi sáng,
+  dạo quanh nhà, đọc báo, Godzilla hack, đóng máy bay, bay đi, đánh
+  nhau, giao coin cho CZ, kết thúc) để anh xem cách gắn.
+
+  Về giọng: mỗi câu nên có sẵn trường pitch (nửa cung, lấy giọng Antoni
+  làm mốc: Narrator 0, Player +1, Announcer +2, Receptionist +3, Kid +6,
+  CZ -1, Housekeeper -2, Guard -4, Godzilla -6) HOẶC kịch bản có bảng
+  voice.roles như file mẫu. Nếu cả 2 đều không có, voice.js tự đoán theo
+  tên vai tiếng Anh (bảng trên); vai lạ không đoán được sẽ cảnh báo trong
+  log và dùng pitch 0.
+
+Cách chia key ElevenLabs hoạt động như thế nào?
+  - voice.js hỏi API ElevenLabs xem mỗi key còn bao nhiêu ký tự.
+  - Nó CHIA CÂU TRƯỚC: key nào đủ ký tự cho câu nào thì nhận câu đó.
+    Key đầu hết thì tự chuyển sang key sau, tới khi đủ hết các câu.
+  - Nếu không key nào đủ cho 1 câu thì nó DỪNG NGAY và báo rõ câu nào,
+    cần bao nhiêu ký tự, mỗi key còn bao nhiêu — chưa tạo câu nào nên
+    không tốn quota vô ích.
+  - Tạo giữa chừng mà key hết quota đột xuất thì nó chia lại các câu còn
+    lại sang key khác, không tạo lại từ đầu.
+
+Nếu gặp lỗi:
+  - "Thư mục kb_github không còn kịch bản .json": đã làm hết, hoặc đường
+    dẫn FTP sai (xem lại mục B về public_html/mine).
+  - "Thư mục nhac_nen không có file nhạc .mp3": thư mục trống hoặc đường
+    dẫn FTP sai (xem lại mục B). Bước này chạy TRƯỚC khi render nên job
+    dừng sớm, chưa tốn công render — thêm file .mp3 vào nhac_nen (hoặc
+    sửa music_dir) rồi chạy lại.
+  - "Thiếu FTP_HOST / FTP_USERNAME / FTP_PASSWORD": chưa thêm đủ 3 secret.
+  - "Kịch bản không bắt đầu chạy": xem file render-debug.png trong log và
+    dòng "Thông báo của game". Thường là play.php trên host quá cũ (không
+    có kbRun) hoặc kịch bản lỗi kiểm tra.
+  - "Màn hình chờ không tắt": kịch bản kẹt ở bước scene/wake, kiểm tra lại
+    kịch bản trên máy trước khi chạy workflow.
+  - "KHỚP THẤT BẠI ... câu không có mốc thời gian": caption bắt được không
+    khớp nội dung câu trong kịch bản. Xem file captions.json trong artifact
+    debug để đối chiếu.
+  - "Không đủ ký tự": thêm key vào file api.txt trên host rồi chạy lại.
+  - Lỗi ở BƯỚC ĐĂNG YOUTUBE ("No account could upload", "MySQL
+    unreachable", "token refresh failed", "YouTube refused"): video vẫn
+    nằm trong Artifacts (tải về đăng tay được), kịch bản vẫn nằm trong
+    kb_github và KHÔNG bị chuyển. Kiểm tra theo thứ tự: (1) đã điền
+    db_name chưa (hoặc DB_NAME trong Secrets/Variables), (2) bảng
+    tb_bao_secret có dòng nào có token_mine khác rỗng không, (3) token
+    còn refresh_token không và client_id/client_secret đúng không,
+    (4) quota YouTube của tài khoản (mỗi tài khoản tối đa 9 video/lượt
+    reset num, lỗi quota thì thử tài khoản khác trong bảng). Sửa xong thì
+    chạy lại với đúng tên file kịch bản ở ô script.
+  - "YouTube 400 ..., retrying without tags/language": YouTube từ chối
+    lần đầu (thường do tag), script tự thử lại không kèm tag/ngôn ngữ —
+    đây là hành vi bình thường, nếu lần 2 vẫn lỗi thì job mới dừng.
+  - Lỗi ở BƯỚC CHUYỂN SANG kb_github_exp (video đã đăng YouTube rồi mới
+    lỗi): kịch bản vẫn nằm trong kb_github, lần chạy sau CÓ THỂ bốc lại nó.
+    Trước khi chạy lại, anh chuyển tay file đó sang kb_github_exp (hoặc
+    điền đúng tên file vào ô script để chạy lại nó, rồi nó sẽ tự chuyển).
+  - Lỗi ở các bước trước bước chuyển: kịch bản vẫn nằm trong kb_github,
+    chưa bị chuyển đi — chạy lại bình thường (bốc ngẫu nhiên có thể bốc
+    file khác; muốn chạy lại đúng file đó thì điền tên file vào ô script).
+
+Tùy chọn thêm:
+  - Nhạc nền chạy tự động theo mặc định: bốc ngẫu nhiên từ nhac_nen, mức
+    0.2 (20%), tự lặp tới hết video, giọng nói giữ nguyên mức (không bị
+    nhạc lấn). Muốn đổi mức thì sửa ô music_volume lúc chạy; muốn 1 bản
+    cụ thể thì điền tên file vào ô music. Chạy riêng voice.js thì dùng cờ
+    --music <file> --music-volume 0.2.
+  - Đăng YouTube: mặc định video lên public, danh mục Gaming (20), không
+    đánh dấu dành cho trẻ em. Muốn đổi thì sửa lúc chạy: yt_privacy =
+    unlisted/private, yt_category = ID danh mục khác, yt_made_for_kids =
+    true (chỉ bật khi video thật sự hướng tới trẻ em — bật sai có thể bị
+    YouTube xử lý), yt_publish_at = HH:MM theo giờ UTC (vd muốn phát hành
+    09:00 giờ VN thì điền 02:00; video sẽ lên private trước rồi tự public
+    đúng giờ; nếu giờ đó cách lúc chạy chưa tới 20 phút thì đăng ngay).
+    Muốn xem trước tiêu đề/tag mà không đăng thì chạy riêng trên máy:
+    python upload_youtube.py --video <ten>.mp4 --meta upload_meta.json
+    --dry-run (không cần database, chỉ in tiêu đề/tags và ghi file
+    <ten>.youtube.json).
+  - Pipeline không làm thumbnail riêng cho video — YouTube sẽ tự chọn 1
+    khung hình trong video làm ảnh đại diện. Muốn thumbnail riêng thì
+    thêm bước sau (chụp frame đẹp từ video rồi dùng thumbnails.set).
+  - Muốn nhẹ/nhanh hơn: đặt img_format = jpeg, hoặc giảm fps xuống 24,
+    hoặc giảm width/height xuống 1920x1080.
+  - Muốn dùng kịch bản khác: chỉ cần file JSON đó cũng có trường pitch
+    (hoặc bảng voice.roles) và video_title/video_description, rồi bỏ vào
+    kb_github là workflow tự bốc.
