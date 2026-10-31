@@ -149,28 +149,57 @@ function extractLines(script) {
 // Trả về {start, end, text, auto} hoặc null (không có hook). Cửa sổ cắt:
 // từ 0.5s trước câu đến 0.3s sau câu kế tiếp (hoặc +6s nếu là câu cuối).
 function hookWindow(lines, videoDur) {
+  // Mốc dùng để cắt hook: ưu tiên mốc ĐÃ XẾP LỊCH (start) vì đó mới là
+  // lúc câu thoại thật sự phát ra trong video cuối; chưa xếp lịch thì
+  // dùng mốc caption (time) như cũ.
+  const tOf = (l) => (typeof l.start === 'number' ? l.start : l.time);
   let idx = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].hook && typeof lines[i].time === 'number') { idx = i; break; }
+    if (lines[i].hook && typeof tOf(lines[i]) === 'number') { idx = i; break; }
   }
   let auto = false;
   if (idx < 0) {
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
-      if (l.kind !== 'say' && typeof l.time === 'number' && l.time > videoDur * 0.25 && /!/.test(l.text)) { idx = i; auto = true; break; }
+      if (l.kind !== 'say' && typeof tOf(l) === 'number' && tOf(l) > videoDur * 0.25 && /!/.test(l.text)) { idx = i; auto = true; break; }
     }
   }
   if (idx < 0) return null;
   const line = lines[idx];
   let nextT = null;
   for (let j = idx + 1; j < lines.length; j++) {
-    if (typeof lines[j].time === 'number') { nextT = lines[j].time; break; }
+    if (typeof tOf(lines[j]) === 'number') { nextT = tOf(lines[j]); break; }
   }
-  const start = Math.max(0, line.time - 0.5);
-  let end = nextT !== null ? Math.min(videoDur, nextT + 0.3) : Math.min(videoDur, line.time + 6);
+  const lt = tOf(line);
+  const start = Math.max(0, lt - 0.5);
+  let end = nextT !== null ? Math.min(videoDur, nextT + 0.3) : Math.min(videoDur, lt + 6);
   if (end - start < 1.5) end = Math.min(videoDur, start + 3);
   if (end - start < 1.5) return null;
   return { start, end, text: line.text, auto };
+}
+
+// Xếp lịch phát giọng theo 2 chuỗi riêng: lời dẫn (kind 'say') xếp với
+// nhau, lời thoại xếp với nhau — cùng loại không bao giờ chồng nhau.
+// KHÁC loại được phép trùng mốc (vd lời thoại chạy dài đè lên lời dẫn
+// tới sau): lúc đó bước ráp sẽ dùng ducking — thoại tự hạ nhỏ dưới lời
+// dẫn rồi tự to lại khi lời dẫn hết (xem phần ráp bên dưới).
+// Trả về { audioEnd, maxLag }.
+// (Lý do cần xếp lại: game chờ mỗi câu theo max(2, ký tự × 0.05–0.06s)
+// nhưng giọng đọc tiếng Anh thường chậm hơn (~0.07s/ký tự) nên đặt đúng
+// mốc caption sẽ làm câu sau đè lên câu trước.)
+function scheduleLines(lines) {
+  let prevNarEnd = 0, prevDlgEnd = 0, maxLag = 0;
+  for (const l of lines) {
+    if (typeof l.time !== 'number' || typeof l.dur !== 'number') { l.start = null; continue; }
+    const prevEnd = l.kind === 'say' ? prevNarEnd : prevDlgEnd;
+    const start = Math.max(l.time, prevEnd);
+    l.start = start;
+    l.end = start + l.dur;
+    l.lag = start - l.time;
+    if (l.lag > maxLag) maxLag = l.lag;
+    if (l.kind === 'say') prevNarEnd = l.end; else prevDlgEnd = l.end;
+  }
+  return { audioEnd: Math.max(prevNarEnd, prevDlgEnd), maxLag };
 }
 
 // Pitch từ bảng voice.roles của chính kịch bản (nếu có) — dùng khi câu chưa
@@ -193,10 +222,10 @@ function fallbackPitch(kind, speaker) {
   if (kind === 'say') return 0; // lời dẫn luôn là mốc 0
   const n = String(speaker || '').toLowerCase();
   if (n.includes('godzilla')) return -6;
-  if (n.includes('bé') || n.includes('baby') || n.includes('kid') || n.includes('child') || /(^|[^a-z])na([^a-z]|$)/.test(n)) return 6;
+  if (n.includes('bé') || n.includes('baby') || n.includes('kid') || n.includes('child') || n.includes('lily') || /(^|[^a-z])na([^a-z]|$)/.test(n)) return 6;
   if (n.includes('quản gia') || n.includes('housekeeper')) return -2;
-  if (n.includes('bảo vệ') || n.includes('guard') || n.includes('bao')) return -4;
-  if (n.includes('lễ tân') || n.includes('receptionist') || /(^|[^a-z])an([^a-z]|$)/.test(n)) return 3;
+  if (n.includes('bảo vệ') || n.includes('guard') || n.includes('bao') || /(^|[^a-z])ben([^a-z]|$)/.test(n)) return -4;
+  if (n.includes('lễ tân') || n.includes('receptionist') || n.includes('anna') || /(^|[^a-z])an([^a-z]|$)/.test(n)) return 3;
   if (n.includes('cz')) return -1;
   if (n.includes('loa') || n.includes('announcer') || n.includes('hq') || n.includes('binance')) return 2;
   if (n.includes('bạn') || n.includes('player') || /(^|[^a-z])you([^a-z]|$)/.test(n)) return 1;
@@ -401,34 +430,78 @@ async function main() {
   }
   console.log(`Đã tạo đủ ${lines.length} câu.`);
 
-  // Ráp đường tiếng: mỗi câu adelay đúng mốc (mili giây), trộn lại, đệm tới hết video.
+  // Đo độ dài từng câu rồi xếp lịch lại để giọng không chồng nhau (xem
+  // scheduleLines). Tiếng có thể trễ nhẹ so với cảnh trong đoạn thoại
+  // dày, nhưng không bao giờ 2 giọng nói cùng lúc.
+  for (let i = 0; i < lines.length; i++) lines[i].dur = await ffprobeDuration(lines[i].pitched);
+  const sched = scheduleLines(lines);
+  console.log(`Đã xếp lịch giọng: ${lines.length} câu, trễ tối đa ${sched.maxLag.toFixed(2)}s so với mốc caption.`);
+
+  // Ráp đường tiếng thành 2 bus riêng (lời dẫn + lời thoại), rồi DUCKING:
+  // bus thoại đi qua sidechaincompress với sidechain là bus lời dẫn —
+  // khi lời dẫn vang lên, thoại tự hạ nhỏ; lời dẫn hết thì thoại tự to
+  // lại. (Chỉ có 1 bus thì bỏ qua bước ducking, dùng thẳng bus đó.)
   const videoDur = await ffprobeDuration(VIDEO_IN);
   console.log(`Video dài ${videoDur.toFixed(1)}s.`);
+  const outDur = Math.max(videoDur, sched.audioEnd);
+  const nar = lines.filter((l) => l.kind === 'say');
+  const dlg = lines.filter((l) => l.kind !== 'say');
+  console.log(`Lời dẫn: ${nar.length} câu, lời thoại: ${dlg.length} câu — thoại duck dưới lời dẫn, nhạc duck dưới giọng.`);
   const filterParts = [];
   const inputs = [];
-  lines.forEach((l, i) => {
-    inputs.push('-i', l.pitched);
-    filterParts.push(`[${i}:a]adelay=${Math.round(l.time * 1000)}:all=1[a${i}]`);
-  });
-  let filter;
-  if (lines.length === 1) {
-    filter = `${filterParts[0]},apad[aout]`;
+  let inIdx = 0;
+  const bus = (group, tag) => {
+    if (!group.length) return null;
+    const tags = [];
+    for (const l of group) {
+      inputs.push('-i', l.pitched);
+      const idx = inIdx++;
+      filterParts.push(`[${idx}:a]adelay=${Math.round(l.start * 1000)}:all=1[${tag}${idx}]`);
+      tags.push(`[${tag}${idx}]`);
+    }
+    if (tags.length === 1) filterParts.push(`${tags[0]}apad[${tag}mix]`);
+    else filterParts.push(`${tags.join('')}amix=inputs=${tags.length}:normalize=0:duration=longest,apad[${tag}mix]`);
+    return `[${tag}mix]`;
+  };
+  const narMix = bus(nar, 'n');
+  const dlgMix = bus(dlg, 'd');
+  let voiceTag;
+  if (narMix && dlgMix) {
+    filterParts.push(`${dlgMix}${narMix}sidechaincompress=threshold=0.05:ratio=6:attack=20:release=400[dd]`);
+    filterParts.push(`[nmix][dd]amix=inputs=2:normalize=0:duration=longest,apad[aout]`);
+    voiceTag = '[aout]';
   } else {
-    filter = filterParts.join(';') + ';' + lines.map((_, i) => `[a${i}]`).join('') + `amix=inputs=${lines.length}:normalize=0:duration=longest,apad[aout]`;
+    voiceTag = narMix || dlgMix;
   }
+  const filter = filterParts.join(';');
   const voiceTrack = path.join(WORK_DIR, 'voice_track.wav');
-  await run('ffmpeg', ['-y', '-v', 'error', ...inputs, '-filter_complex', filter, '-map', '[aout]', '-t', String(videoDur), voiceTrack]);
+  await run('ffmpeg', ['-y', '-v', 'error', ...inputs, '-filter_complex', filter, '-map', voiceTag, '-t', String(outDur), voiceTrack]);
+
+  // Nếu tiếng kéo dài quá video (đoạn thoại cuối bị xếp trễ dồn lại) thì
+  // kéo dài video bằng khung hình cuối (tpad) thay vì cắt mất câu cuối.
+  // Làm thành 1 bước riêng để khỏi xung đột filter với bước mux bên dưới.
+  let videoInEff = VIDEO_IN;
+  let padded = false;
+  if (outDur > videoDur + 0.05) {
+    const pad = outDur - videoDur;
+    videoInEff = path.join(WORK_DIR, 'video_padded.mp4');
+    console.log(`Tiếng dài hơn video ${pad.toFixed(1)}s — kéo dài video bằng khung cuối (tpad) để không cắt câu cuối.`);
+    await run('ffmpeg', ['-y', '-v', 'error', '-i', VIDEO_IN, '-vf', `tpad=stop_mode=clone:stop_duration=${pad.toFixed(3)}`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'medium', '-movflags', '+faststart', videoInEff]);
+    padded = true;
+  }
 
   // Mux vào video (giữ nguyên hình, thêm tiếng; có nhạc nền thì trộn nhỏ bên dưới).
   // Nhạc nền lặp vô hạn (-stream_loop -1) nhưng amix duration=first cắt
   // đúng độ dài đường giọng (= độ dài video), nên nhạc kéo dài tới hết
   // kịch bản rồi dừng cùng video. normalize=0 để giọng giữ nguyên mức,
   // nhạc ở đúng mức volume đã đặt (không bị amix chia đôi đường tiếng).
-  const muxArgs = ['-y', '-v', 'error', '-i', VIDEO_IN, '-i', voiceTrack];
+  // Nhạc cũng DUCK dưới giọng (sidechaincompress, sidechain là giọng):
+  // có người nói thì nhạc tự nhỏ lại, hết nói thì nhạc tự to lại.
+  const muxArgs = ['-y', '-v', 'error', '-i', videoInEff, '-i', voiceTrack];
   let muxFilter = null;
   if (MUSIC) {
     muxArgs.push('-stream_loop', '-1', '-i', MUSIC);
-    muxFilter = `[1:a]volume=1.0[v];[2:a]volume=${MUSIC_VOL},apad[m];[v][m]amix=inputs=2:normalize=0:duration=first:dropout_transition=0[a]`;
+    muxFilter = `[1:a]volume=1.0[v];[2:a]volume=${MUSIC_VOL},apad[m];[m][v]sidechaincompress=threshold=0.05:ratio=4:attack=20:release=500[md];[v][md]amix=inputs=2:normalize=0:duration=first:dropout_transition=0[a]`;
     muxArgs.push('-filter_complex', muxFilter, '-map', '0:v', '-map', '[a]');
   } else {
     muxArgs.push('-map', '0:v', '-map', '1:a');
@@ -438,8 +511,13 @@ async function main() {
 
   const planOut = {
     videoSeconds: videoDur,
+    audioSeconds: sched.audioEnd,
+    outSeconds: outDur,
+    maxLagSeconds: sched.maxLag,
+    videoPadded: padded,
+    ducking: { dialogueUnderNarration: !!(narMix && dlgMix), musicUnderVoice: !!MUSIC },
     voiceId: VOICE_ID, model: MODEL_ID,
-    lines: lines.map((l, i) => ({ i: i + 1, time: l.time, speaker: l.speaker, pitch: l.pitch, key: l.keyMasked, chars: l.chars }))
+    lines: lines.map((l, i) => ({ i: i + 1, kind: l.kind, time: l.time, start: l.start, dur: l.dur, lag: l.lag, speaker: l.speaker, pitch: l.pitch, key: l.keyMasked, chars: l.chars }))
   };
   fs.writeFileSync(path.join(WORK_DIR, 'voice_plan.json'), JSON.stringify(planOut, null, 2), 'utf-8');
   // Meta cho bước đăng YouTube sau này: tiêu đề + mô tả + tags + chapter
@@ -453,7 +531,7 @@ async function main() {
   // giây). Hook: cửa sổ vài giây đoạn hay để đặt sau intro (xem
   // hookWindow); bước cắt hook và bước ghép sẽ dùng nó, rồi cộng độ dài
   // hook vào chapters.
-  const hook = hookWindow(lines, videoDur);
+  const hook = hookWindow(lines, outDur);
   if (hook) console.log(`Hook: câu "${String(hook.text).slice(0, 80)}" từ ${hook.start.toFixed(2)}s đến ${hook.end.toFixed(2)}s (${hook.auto ? 'máy tự chọn' : 'đã đánh dấu'}).`);
   else console.log('Hook: không có đoạn hay (muốn có thì gắn "hook": true vào 1 câu thoại).');
   const uploadMeta = {
@@ -474,4 +552,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error('VOICE THẤT BẠI:', e && e.stack || e); process.exit(1); });
-module.exports = { extractLines, matchCaptions, hookWindow };
+module.exports = { extractLines, matchCaptions, hookWindow, scheduleLines, fallbackPitch };

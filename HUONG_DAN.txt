@@ -260,7 +260,6 @@ Chạy lần đầu (CHẠY THỬ, quan trọng):
        output      : để trống (tên video sẽ lấy theo tên kịch bản được bốc)
        script      : để trống (bốc ngẫu nhiên) — hoặc ghi đúng tên file
                      .json trong kb_github nếu muốn chạy 1 kịch bản cụ thể
-       music_dir   : nhac_nen (đổi nếu web nằm sâu hơn, xem mục B)
        music       : để trống (bốc ngẫu nhiên) — hoặc ghi đúng tên file
                      .mp3 trong nhac_nen nếu muốn 1 bản cụ thể
        music_volume: 0.2 (20%; tăng/giảm nếu muốn nhạc to/nhỏ hơn)
@@ -270,6 +269,15 @@ Chạy lần đầu (CHẠY THỬ, quan trọng):
                      sang kb_github_exp, để chạy thật sau.
        db_name     : tên database chứa bảng tb_bao_secret (để trống nếu
                      đã thêm DB_NAME vào GitHub)
+     Lưu ý: chế độ chạy thử (max_frames != 0) chỉ kiểm tra bước render
+     (game có mở được không, kịch bản có chạy không, hình có đúng không)
+     rồi DỪNG — workflow tự bỏ qua các bước giọng/hook/Short/intro/
+     thumbnail/ghép/đăng, chỉ đăng video thử (không tiếng) lên Artifacts.
+     Lý do: video thử chỉ phát đoạn đầu kịch bản nên captions.json
+     không đủ mốc cho cả 49 câu — bước giọng mà chạy thì chắc chắn lỗi
+     "KHỚP THẤT BẠI ... câu không có mốc thời gian" (exit 3), vì nó
+     không đoán mò mốc thời gian rồi ráp lệch tiếng. Đây là hành vi cố
+     ý, không phải lỗi.
   3. Đợi job chạy xong, tải file ở mục Artifacts về xem:
        - Hình có đúng cảnh game không, có bị màn hình chờ che không
        - Log dòng "Bốc ngẫu nhiên được:" để biết đã bốc đúng file chưa
@@ -345,17 +353,57 @@ Cách chia key ElevenLabs hoạt động như thế nào?
   - Tạo giữa chừng mà key hết quota đột xuất thì nó chia lại các câu còn
     lại sang key khác, không tạo lại từ đầu.
 
+Chữ trên màn hình + báo giấy + giọng không chồng (từ bản v1.13):
+  - Từ bản này bước render chụp TOÀN TRANG (page.screenshot) thay vì chỉ
+    chụp canvas game, nên khung chữ lời dẫn/thoại và popup báo giấy đều
+    lọt vào video (trước đây chụp canvas nên 2 thứ này mất hẳn).
+  - Khung chữ: lời dẫn giữ màu vàng + nhãn 📖 NARRATION; mỗi nhân vật
+    một màu riêng (viền + tên) theo thứ tự xuất hiện, kèm hiệu ứng mờ
+    dần + trồi lên mỗi câu mới. Tên nhân vật hiển thị đúng như trong
+    kịch bản (kịch bản tiếng Anh thì tên tiếng Anh: Mrs. Housekeeper,
+    Lily, Anna, CZ, Uncle Ben, Godzilla, You, Binance HQ...).
+  - Vị trí chữ (mặc định, từ bản v1.14): lời dẫn ở phía DƯỚI màn hình,
+    lời thoại ở phía TRÊN màn hình — nhìn là biết ngay câu nào là dẫn,
+    câu nào là nhân vật nói.
+  - Giọng không chồng nhau: game chờ mỗi câu theo max(2, ký tự ×
+    0.05–0.06s) nhưng giọng đọc tiếng Anh chậm hơn (~0.07s/ký tự) nên
+    trước đây câu sau đè lên câu trước. Từ bản này bước giọng xếp lịch
+    lại theo 2 chuỗi riêng (lời dẫn xếp với lời dẫn, lời thoại xếp với
+    lời thoại) nên cùng loại không bao giờ chồng nhau. Khác loại mà trùng
+    nhau thì dùng DUCKING (từ bản v1.14): thoại tự hạ nhỏ dưới lời dẫn
+    (sidechaincompress) rồi tự to lại khi lời dẫn hết; nhạc nền cũng
+    duck dưới giọng theo cùng cách. Nếu tiếng dài hơn video thì video
+    tự kéo dài bằng khung cuối để không cắt câu cuối.
+  - img_format mặc định từ bản này là jpeg (chụp từng frame nhanh hơn
+    nhiều, đủ nét cho game hoạt hình); muốn nét nhất thì đặt img_format
+    = png (chậm hơn).
+
+Tên nhân vật tiếng Anh (từ bản v1.14, kịch bản mẫu tiếng Anh):
+  - Little Na → Lily (neighbor); An → Anna (Binance Receptionist);
+    Uncle Bao → Uncle Ben (Binance Guard). Chỉ đổi tên hiển thị, id
+    nhân vật (na/an/bao) và cao độ giọng (Lily +6, Anna +3, Ben −4)
+    giữ nguyên. Kịch bản tiếng Việt gốc không đổi.
+
 Nếu gặp lỗi:
   - "spawn ffmpeg ENOENT" ở bước render: máy chạy không có sẵn ffmpeg.
     Từ bản v1.11 workflow tự cài bằng apt nếu thiếu (bước "Cài ffmpeg")
     nên lỗi này không còn xảy ra; nếu vẫn gặp thì kiểm tra xem máy chạy
     có cho sudo apt hay không.
+  - "KHỚP THẤT BẠI ... câu không có mốc thời gian" (exit 3) ở bước
+    giọng: video render ra chỉ chứa đoạn đầu kịch bản (do chạy thử
+    max_frames != 0, hoặc kịch bản kết thúc sớm vì lỗi trong game) nên
+    các câu sau không có caption để khớp. Kiểm tra log bước render:
+    "Dừng ở MAX_FRAMES=..." nghĩa là đang chạy thử — muốn ra video thật
+    thì chạy max_frames = 0; còn "Kịch bản đã kết thúc" mà video vẫn
+    ngắn thì kịch bản lỗi giữa chừng trong game, xem tiếp log render và
+    kiểm tra play.php trên host đã là bản mới nhất (title phải đọc
+    "v18 english") chưa.
   - "Thư mục kb_github không còn kịch bản .json": đã làm hết, hoặc đường
     dẫn FTP sai (xem lại giá trị secret PROJECT_DIR trong mục B).
   - "Thư mục nhac_nen không có file nhạc .mp3": thư mục trống hoặc đường
-    dẫn FTP sai (xem lại mục B). Bước này chạy TRƯỚC khi render nên job
-    dừng sớm, chưa tốn công render — thêm file .mp3 vào nhac_nen (hoặc
-    sửa music_dir) rồi chạy lại.
+    dẫn FTP sai (xem lại giá trị secret PROJECT_DIR trong mục B). Bước
+    này chạy TRƯỚC khi render nên job dừng sớm, chưa tốn công render —
+    thêm file .mp3 vào nhac_nen rồi chạy lại.
   - "Thiếu FTP_HOST / FTP_USERNAME / FTP_PASSWORD": chưa thêm đủ 3 secret.
   - "Kịch bản không bắt đầu chạy": xem file render-debug.png trong log và
     dòng "Thông báo của game". Thường là play.php trên host quá cũ (không
@@ -407,8 +455,8 @@ Tùy chọn thêm:
   - Pipeline không làm thumbnail riêng cho video — YouTube sẽ tự chọn 1
     khung hình trong video làm ảnh đại diện. Muốn thumbnail riêng thì
     thêm bước sau (chụp frame đẹp từ video rồi dùng thumbnails.set).
-  - Muốn nhẹ/nhanh hơn: đặt img_format = jpeg, hoặc giảm fps xuống 24,
-    hoặc giảm width/height xuống 1920x1080.
+  - Muốn nhẹ/nhanh hơn nữa: giảm fps xuống 24, hoặc giảm width/height
+    xuống 1920x1080 (img_format mặc định đã là jpeg từ bản v1.13).
   - Muốn dùng kịch bản khác: chỉ cần file JSON đó cũng có trường pitch
     (hoặc bảng voice.roles) và video_title/video_description, rồi bỏ vào
     kb_github là workflow tự bốc.

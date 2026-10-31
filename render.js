@@ -5,13 +5,21 @@
 //   - performance.now() luôn trả về thời gian ẢO do driver điều khiển.
 //   - requestAnimationFrame() không tự chạy nữa mà xếp callback vào hàng đợi.
 // Mỗi bước driver tăng thời gian ảo đúng 1/FPS giây, gọi 1 lượt callback, rồi chụp
-// canvas bằng toDataURL. Nhờ vậy video 2K vẫn mượt dù máy chủ không có GPU và
-// không chạy kịp thời gian thực: khung hình nào cũng được vẽ đủ rồi mới chụp.
+// TOÀN TRANG bằng page.screenshot (không chụp riêng canvas nữa). Nhờ vậy video
+// 2K vẫn mượt dù máy chủ không có GPU và không chạy kịp thời gian thực: khung
+// hình nào cũng được vẽ đủ rồi mới chụp — và quan trọng hơn, các phần tử DOM
+// của game cũng lọt vào video: khung chữ lời dẫn/thoại (#kbCaption) và cả
+// popup báo giấy (#npOverlay) mà trước đây chụp canvas thì mất hẳn.
+// Định dạng ảnh chụp theo IMG_FORMAT (png nét nhất, jpeg nhanh nhẹ hơn).
 //
 // Caption (lời dẫn + thoại) được bắt bằng cách bọc 2 hàm hiện chữ của game:
 //   kbSay(text) và kbSayDialogue(name, text). Mỗi lần game hiện câu nào là driver
 //   ghi lại đúng mốc thời gian ảo lúc đó, để bước ráp giọng đặt file tiếng vào
 //   đúng chỗ, không lệch dù đoạn đánh nhau/bay có dài ngắn khác nhau.
+// Ngoài ra driver còn trang trí khung chữ ngay trong trang trước khi chụp:
+//   hiệu ứng mờ + trồi lên mỗi câu mới, và mỗi nhân vật một màu riêng
+//   (lời dẫn giữ màu vàng, thoại tô màu theo tên người nói) để người xem
+//   phân biệt được ai đang nói chỉ bằng màu sắc.
 //
 // Biến môi trường:
 //   GAME_URL     (bắt buộc) URL tới play.php, vd https://lop2b.click/mine/play.php
@@ -66,8 +74,10 @@ const INIT_SCRIPT = `
     return window.__rafQueue.length;
   };
   window.cancelAnimationFrame = function () {};
-  // Một bước render: tăng thời gian ảo đúng 1 frame, chạy 1 lượt vòng lặp vẽ,
-  // rồi chụp canvas. Trả về khung hình + trạng thái để driver quyết định tiếp.
+  // Một bước render: tăng thời gian ảo đúng 1 frame, chạy 1 lượt vòng lặp vẽ.
+  // Ảnh KHÔNG chụp trong này nữa (toDataURL chỉ lấy được canvas, mất chữ
+  // và báo giấy) — driver ở Node sẽ chụp toàn trang bằng page.screenshot
+  // sau mỗi bước. Hàm này chỉ trả về trạng thái để driver quyết định tiếp.
   window.__step = function () {
     window.__vt += 1000 / window.__FPS;
     const q = window.__rafQueue;
@@ -75,21 +85,11 @@ const INIT_SCRIPT = `
     for (const cb of q) {
       try { cb(window.__vt); } catch (e) { window.__rafError = String((e && e.stack) || e); }
     }
-    const cv = document.querySelector('#game canvas');
     const loadingEl = document.getElementById('kbLoading');
     const loading = !!loadingEl && getComputedStyle(loadingEl).display !== 'none';
     const caps = window.__captions;
     window.__captions = [];
-    let png = null;
-    if (cv) {
-      try {
-        png = ${IMG_FORMAT === 'jpeg'
-          ? "cv.toDataURL('image/jpeg', " + JPEG_QUALITY + ")"
-          : "cv.toDataURL('image/png')"};
-      } catch (e) { window.__rafError = 'toDataURL: ' + String(e); }
-    }
     return {
-      png,
       running: document.body.classList.contains('kb-running'),
       loading,
       caps,
@@ -132,6 +132,9 @@ async function main() {
   await page.waitForSelector('#game canvas', { timeout: 180000 });
   // Ẩn nút 👁️ hiện/ẩn UI trong lúc chạy kịch bản để video sạch.
   await page.addStyleTag({ content: '#kbUiReveal{display:none !important}' });
+  // Khung chữ hiện kiểu hoạt hình: mỗi câu mới mờ dần + trồi lên. Keyframes
+  // giữ nguyên translateX(-50%) căn giữa để khung không nhảy ngang.
+  await page.addStyleTag({ content: '#kbCaption{animation:kbCapIn .4s ease-out}@keyframes kbCapIn{from{opacity:0;transform:translateX(-50%) translateY(14px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}' });
   await sleep(1000);
 
   // Bắt đầu chơi (auto=true để bỏ qua xin khóa chuột + tiếng bíp).
@@ -145,15 +148,42 @@ async function main() {
     await sleep(1000);
   }
 
-  // Bọc 2 hàm hiện chữ để bắt mốc caption. (Nếu game đổi tên hàm thì báo rõ.)
+  // Bọc 2 hàm hiện chữ để bắt mốc caption + trang trí khung chữ cho video.
+  // (Nếu game đổi tên hàm thì báo rõ.)
   const wrapped = await page.evaluate(() => {
     window.__captions = [];
+    // Mỗi nhân vật một màu riêng (cấp theo thứ tự xuất hiện, không băm tên
+    // để khỏi trùng màu; 12 nhân vật đầu chắc chắn khác nhau). Lời dẫn
+    // giữ màu vàng của game, không đổi.
+    const SPEAKER_COLORS = ['#7dd3fc', '#f9a8d4', '#86efac', '#fdba74', '#c4b5fd', '#5eead4', '#fca5a5', '#fde047', '#e879f9', '#22d3ee', '#a3e635', '#fb7185'];
+    const speakerColorMap = {};
+    function speakerColor(name) {
+      const k = String(name);
+      if (!speakerColorMap[k]) speakerColorMap[k] = SPEAKER_COLORS[Object.keys(speakerColorMap).length % SPEAKER_COLORS.length];
+      return speakerColorMap[k];
+    }
+    // Chạy lại hiệu ứng hiện khung chữ cho mỗi câu mới (game giữ display
+    // block liên tục giữa các câu nên không ép thì hiệu ứng chỉ chạy 1 lần).
+    function restartCapAnim() {
+      const c = document.getElementById('kbCaption');
+      if (!c) return;
+      c.style.animation = 'none';
+      void c.offsetWidth;
+      c.style.animation = '';
+    }
     let ok = 0;
     if (typeof window.kbSay === 'function') {
       const orig = window.kbSay;
       window.kbSay = function (text) {
         if (text) window.__captions.push({ t: window.__vt / 1000, text: String(text), head: 'narration' });
-        return orig(text);
+        const r = orig(text);
+        if (text) {
+          // Mặc định: lời dẫn hiển thị phía DƯỚI màn hình.
+          const c = document.getElementById('kbCaption');
+          if (c) { c.style.top = 'auto'; c.style.bottom = '60px'; }
+          restartCapAnim();
+        }
+        return r;
       };
       ok++;
     }
@@ -161,7 +191,21 @@ async function main() {
       const orig = window.kbSayDialogue;
       window.kbSayDialogue = function (name, text) {
         if (text) window.__captions.push({ t: window.__vt / 1000, text: String(text), head: String(name) });
-        return orig(name, text);
+        const r = orig(name, text);
+        if (text) {
+          const c = document.getElementById('kbCaption');
+          if (c) {
+            const col = speakerColor(name);
+            c.style.borderColor = col;
+            const lb = c.querySelector('span');
+            if (lb) lb.style.color = col;
+            // Mặc định: lời thoại hiển thị phía TRÊN màn hình.
+            c.style.top = '150px';
+            c.style.bottom = 'auto';
+          }
+          restartCapAnim();
+        }
+        return r;
       };
       ok++;
     }
@@ -205,7 +249,6 @@ async function main() {
     for (;;) {
       const r = await page.evaluate(() => window.__step());
       if (r.rafError) throw new Error('Lỗi trong vòng lặp game: ' + r.rafError);
-      if (!r.png) throw new Error('Không chụp được canvas (game chưa vẽ khung hình nào).');
 
       if (r.running) startedRun = true;
       if (!startedRun) {
@@ -228,8 +271,12 @@ async function main() {
       }
       // Caption ghi trong bước này thuộc về frame sắp ghi (mốc = số frame đã có).
       for (const c of r.caps) captionsOut.push({ t: emitted / FPS, text: c.text, head: c.head });
-      const buf = Buffer.from(r.png.split(',')[1], 'base64');
-      await writeFrame(buf);
+      // Chụp TOÀN TRANG (game + khung chữ + popup báo giấy) thay vì chỉ canvas.
+      const shot = await page.screenshot(IMG_FORMAT === 'jpeg'
+        ? { type: 'jpeg', quality: Math.round(JPEG_QUALITY * 100) }
+        : { type: 'png' });
+      if (!shot || !shot.length) throw new Error('Không chụp được màn hình (screenshot rỗng).');
+      await writeFrame(shot);
       emitted++;
       if (emitted % 300 === 0) {
         const wall = (Date.now() - wallStart) / 1000;
