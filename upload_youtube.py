@@ -42,6 +42,12 @@ Chay:
     de cung kenh voi video chinh; neu tai khoan nay da du 9 luot thi tu
     reset num=0 thay vi doi sang kenh khac),
     --set-thumbnail --sidecar <video>.youtube.json --image thumb.jpg,
+    --comment main|short --sidecar <video>.youtube.json --meta upload_meta.json
+    (dang 1 binh luan keu goi tuong tac duoi video vua dang, dung cung
+    tai khoan voi video do; can scope youtube.force-ssl — loi thi thoat
+    1 de workflow bo qua, video van giu nguyen. Luu y: YouTube Data API
+    khong co chuc nang ghim (pin) binh luan, muon ghim thi ghim tay trong
+    YouTube Studio),
     --dry-run (chi in tieu de/tags, khong dung DB, khong dang).
 
 Token khong bao gio in ra log. Log chi in 12 ky tu dau cua client_id
@@ -68,6 +74,7 @@ MAX_NUM = 9
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"
 THUMB_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
+COMMENT_URL = "https://www.googleapis.com/youtube/v3/comments"
 HAS_TOKEN = f"{TOKEN_COLUMN} IS NOT NULL AND TRIM({TOKEN_COLUMN}) <> ''"
 
 
@@ -210,6 +217,44 @@ def set_thumbnail(access_token: str, video_id: str, image_path: Path) -> None:
                       data=data, timeout=120)
     if r.status_code != 200:
         raise AccountError(f"thumbnails.set failed ({r.status_code}): {r.text[:300]}")
+
+
+def build_comment(kind: str, meta: dict) -> str:
+    """Binh luan keu goi tuong tac cho video chinh ('main') hoac Short
+    ('short'). Dung cau hook cua tap lam cau mo neu co (cat ngan gon),
+    roi them cau hoi + CTA like/subscribe. Binh luan dang duoi ten kenh
+    (tai khoan vua dang video) nen hien noi bat ngay duoi video."""
+    hook = ""
+    h = meta.get("hook") or {}
+    if isinstance(h, dict) and h.get("text"):
+        hook = " ".join(str(h["text"]).split())
+        if len(hook) > 150:
+            hook = hook[:150].rsplit(" ", 1)[0].rstrip() + "..."
+    cta = "LIKE 👍 and SUBSCRIBE 🔔 for more Blocky Tales!"
+    if kind == "short":
+        if hook:
+            return f"“{hook}” 😂 What would YOU do? Comment below! 👇 {cta}"
+        return f"😂 What was your favorite part? Comment below! 👇 {cta}"
+    if hook:
+        return (f"“{hook}”\n\nWhat was YOUR favorite moment in this adventure? "
+                f"Tell us below! 👇\n\nIf you laughed, {cta}")
+    return (f"What was YOUR favorite moment in this adventure? Tell us below! 👇\n\n"
+            f"If you laughed, {cta}")
+
+
+def post_comment(access_token: str, video_id: str, text: str) -> str:
+    """Dang 1 binh luan (comments.insert) len video cua chinh kenh do.
+    Can scope youtube.force-ssl trong token. Tra ve comment id. Loi 403
+    thuong la thieu scope, video 'made for kids' hoac video tat binh luan."""
+    r = requests.post(COMMENT_URL, params={"part": "snippet"},
+                      headers={"Authorization": f"Bearer {access_token}",
+                               "Content-Type": "application/json"},
+                      json={"snippet": {"videoId": video_id,
+                                        "topLevelComment": {"snippet": {"textOriginal": text}}}},
+                      timeout=60)
+    if r.status_code != 200:
+        raise AccountError(f"comments.insert HTTP {r.status_code}: {r.text[:300]}")
+    return r.json().get("id", "")
 
 
 def sanitize(info: dict, with_tags: bool = True) -> dict:
@@ -359,7 +404,9 @@ def main() -> None:
     ap.add_argument("--publish-at", default="", help="Release time HH:MM UTC (video is uploaded private and goes public then)")
     ap.add_argument("--pin-account", default="", help="Only upload with this client_id (Short must share the main video's channel)")
     ap.add_argument("--set-thumbnail", action="store_true", help="Set a custom thumbnail instead of uploading a video")
-    ap.add_argument("--sidecar", default="", help="Sidecar <video>.youtube.json holding video_id + client_id (for --set-thumbnail)")
+    ap.add_argument("--comment", choices=["main", "short"], default="",
+                    help="Post an engagement comment instead of uploading a video (needs --sidecar and --meta)")
+    ap.add_argument("--sidecar", default="", help="Sidecar <video>.youtube.json holding video_id + client_id (for --set-thumbnail/--comment)")
     ap.add_argument("--image", default="", help="Thumbnail image file (for --set-thumbnail)")
     ap.add_argument("--dry-run", action="store_true", help="Only show metadata; no DB, no upload")
     args = ap.parse_args()
@@ -391,8 +438,37 @@ def main() -> None:
         print(f"Thumbnail set for https://youtu.be/{video_id}")
         return
 
+    if args.comment:
+        if not args.sidecar:
+            sys.exit("--comment needs --sidecar")
+        sidecar = Path(args.sidecar)
+        if not sidecar.exists():
+            sys.exit(f"Sidecar not found: {sidecar}")
+        side = json.loads(sidecar.read_text(encoding="utf-8"))
+        video_id = side.get("video_id")
+        client_id = side.get("client_id")
+        if not video_id or not client_id:
+            sys.exit("Sidecar has no video_id/client_id (upload may have failed) — skipping comment.")
+        meta = {}
+        meta_path = Path(args.meta)
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        text = build_comment(args.comment, meta)
+        print(f"Comment text:\n{text}")
+        check_db_env()
+        try:
+            row = pinned_candidate(client_id)
+            token = valid_access_token(row)
+            cid = post_comment(token, video_id, text)
+        except (AccountError, RuntimeError) as exc:
+            print(f"Comment failed: {exc}")
+            print("  (Ghi chú) Bình luận cần scope youtube.force-ssl trong token; video 'made for kids' hoặc tắt bình luận cũng bị 403 — video vẫn đã đăng xong, chỉ thiếu bình luận.")
+            sys.exit(1)
+        print(f"Comment posted ({cid}) on https://youtu.be/{video_id}")
+        return
+
     if not args.video:
-        sys.exit("--video is required (unless --set-thumbnail)")
+        sys.exit("--video is required (unless --set-thumbnail/--comment)")
     mp4 = Path(args.video)
     if not mp4.exists():
         sys.exit(f"Video not found: {mp4}")

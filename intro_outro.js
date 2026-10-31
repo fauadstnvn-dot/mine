@@ -59,6 +59,8 @@ const OUTRO_OUT = arg('outro', './outro.mp4');
 const STYLE_ARG = arg('style', '');
 const THUMBNAIL_OUT = arg('thumbnail', '');
 const THUMBNAIL_ONLY = process.argv.includes('--thumbnail-only');
+const BG_PATH = arg('bg', '');
+const TITLE_POS_ARG = arg('title-pos', 'top');
 
 const INTRO_SECS = 5;
 const OUTRO_SECS = 8;
@@ -82,6 +84,18 @@ var W = @@W@@, H = @@H@@;
 var EPISODE = @@EPISODE@@;
 var THUMB_TEXT = @@THUMB@@;
 var STYLE = '@@STYLE@@';
+var BG_SRC = @@BG@@;
+var TITLE_POS = '@@TITLE_POS@@';
+var BG_IMG = null;
+window.__bgReady = false;
+if (BG_SRC) {
+  try {
+    var _bg = new Image();
+    _bg.onload = function () { BG_IMG = _bg; window.__bgReady = true; };
+    _bg.onerror = function () { window.__bgReady = true; };
+    _bg.src = BG_SRC;
+  } catch (e) { window.__bgReady = true; }
+} else { window.__bgReady = true; }
 var SC = W / 2560;
 
 // Font pixel 5x7 (chi co chu hoa + so + dau cau thuong gap; chu thuong se
@@ -190,7 +204,7 @@ function drawText(ctx, text, cx, y, px, color, outline) {
 }
 function wrapText(text, maxW, px, maxLines) {
   text = String(text || '').toUpperCase();
-  var words = text.split(/\s+/).filter(function(s) { return !!s; });
+  var words = text.split(/\\s+/).filter(function(s) { return !!s; });
   var lines = [];
   var cur = '';
   function wOf(s) { return textWidth(s, px); }
@@ -371,8 +385,8 @@ function drawTitleLetters(ctx, text, cx, y, px, color, outline, t, start, stagge
 function titlePx() { return Math.max(10, Math.floor(W * 0.78 / (12 * 6))); }
 function drawEpisode(ctx, t, start) {
   if (!EPISODE) return;
-  var px = Math.max(6, Math.floor(W * 0.005));
-  var lines = wrapText(EPISODE, W * 0.8, px, 3);
+  var f = fitTitle(EPISODE, W * 0.8, 3, H * 0.35, Math.max(6, Math.floor(W * 0.005)));
+  var px = f.px, lines = f.lines;
   var alpha = clamp01((t - start) / 0.8);
   if (alpha <= 0) return;
   var rise = (1 - alpha) * 20 * SC;
@@ -590,11 +604,42 @@ function outroBase(ctx, t, skyTop, skyBot, sunColor, headline, isNight) {
 // vi chu se be ti khong doc duoc), nhan vat to/ro mat, mau nen tuoi hoac
 // toi tuong phan manh voi chu. 4 kieu, cung ten kieu voi intro/outro de
 // video dong bo (village dung chung kieu castle vi cung la canh ngay).
-function thumbTitlePx(maxW) {
-  var px = Math.max(8, Math.floor(Math.min(W * 0.012, H * 0.022)));
+// Co chu thich ung cho tieu de thumbnail/tap: thu px tu co so xuong toi 8
+// sao cho ca cau vua trong maxLines dong va khoi chu khong vuot maxH.
+// Neu toi px=8 ma khoi chu van vua chieu cao thi chap nhan them dong
+// (khong cat "..."); chi cat khi ca chieu cao cung vuot (tieu de cuc dai).
+function fitTitle(text, maxW, maxLines, maxH, basePx) {
+  var px = basePx || Math.max(8, Math.floor(Math.min(W * 0.012, H * 0.022)));
   var fit = Math.floor(maxW / 72);
   if (fit < px && fit >= 8) px = fit;
-  return px;
+  var lines = [];
+  while (true) {
+    lines = wrapText(text, maxW, px, 1000000);
+    var lineH = 8 * px + 8 * SC;
+    var blockH = lines.length * lineH - 8 * SC;
+    if ((lines.length <= maxLines && blockH <= maxH) || px <= 8) break;
+    px--;
+  }
+  var lineH2 = 8 * px + 8 * SC;
+  var blockH2 = lines.length * lineH2 - 8 * SC;
+  if (blockH2 > maxH) lines = wrapText(text, maxW, px, maxLines);
+  return { px: px, lines: lines };
+}
+function drawThumbTitleFit(ctx, text, cx, y, color, outline, maxW, maxLines, maxH, banner, pos, basePx) {
+  var f = fitTitle(text, maxW, maxLines, maxH, basePx);
+  var px = f.px, lines = f.lines;
+  var lineH = 8 * px + 8 * SC;
+  var blockH = lines.length * lineH - 8 * SC;
+  var y0 = y;
+  if (pos === 'bottom') y0 = H - blockH - 24 * SC;
+  if (banner) {
+    var bw = 0;
+    for (var i = 0; i < lines.length; i++) { var w = textWidth(lines[i], px); if (w > bw) bw = w; }
+    var pad = 14 * SC;
+    R(ctx, cx - bw / 2 - pad, y0 - pad, bw + pad * 2, blockH + pad * 2, banner);
+  }
+  for (var j = 0; j < lines.length; j++) drawText(ctx, lines[j], cx, y0 + j * lineH, px, color, outline);
+  return lines;
 }
 function drawThumbTitle(ctx, text, cx, y, px, color, outline, maxW, maxLines, banner) {
   var lines = wrapText(text, maxW, px, maxLines);
@@ -629,16 +674,14 @@ function renderThumbCastle(ctx) {
   drawFlowers(ctx);
   drawFallingBlocks(ctx, 4.9);
   drawChar(ctx, W * 0.16, 2.5, 'idle', 26 * SC * 2.2);
-  var px = thumbTitlePx(W * 0.88);
-  drawThumbTitle(ctx, THUMB_TEXT, W / 2, H * 0.10, px, '#FFD54A', '#1F2937', W * 0.88, 3, null);
+  drawThumbTitleFit(ctx, THUMB_TEXT, W / 2, H * 0.10, '#FFD54A', '#1F2937', W * 0.88, 3, H * 0.5, null, 'top');
 }
 function renderThumbFace(ctx) {
   drawSky(ctx, '#FFD54A', '#FF8C42');
   drawClouds(ctx, 2.5, 'rgba(255,255,255,0.9)');
   drawGround(ctx, '#5FAE3F', '#8B5A2B');
   drawBigHead(ctx, W * 0.26, H * 0.52, H * 0.22);
-  var px = thumbTitlePx(W * 0.52);
-  drawThumbTitle(ctx, THUMB_TEXT, W * 0.70, H * 0.30, px, '#FFFFFF', '#1F2937', W * 0.52, 3, null);
+  drawThumbTitleFit(ctx, THUMB_TEXT, W * 0.70, H * 0.30, '#FFFFFF', '#1F2937', W * 0.52, 3, H * 0.5, null, 'top');
 }
 function renderThumbBattle(ctx) {
   drawSky(ctx, '#3A1F3D', '#FF5A3C');
@@ -647,8 +690,7 @@ function renderThumbBattle(ctx) {
   drawGround(ctx, '#3E7A2C', '#6B4423');
   drawWallBlocks(ctx, 4.9);
   drawChar(ctx, W * 0.16, 2.5, 'idle', 26 * SC * 2.2);
-  var px = thumbTitlePx(W * 0.88);
-  drawThumbTitle(ctx, THUMB_TEXT, W / 2, H * 0.10, px, '#FFD54A', '#1F2937', W * 0.88, 3, 'rgba(0,0,0,0.45)');
+  drawThumbTitleFit(ctx, THUMB_TEXT, W / 2, H * 0.10, '#FFD54A', '#1F2937', W * 0.88, 3, H * 0.5, 'rgba(0,0,0,0.45)', 'top');
 }
 function renderThumbNight(ctx) {
   drawSky(ctx, '#0B1026', '#27356B');
@@ -663,12 +705,23 @@ function renderThumbNight(ctx) {
   var ly = groundY() - 3 * u;
   R(ctx, lx - 40 * SC, ly - 40 * SC, 80 * SC, 80 * SC, 'rgba(255,220,100,0.25)');
   R(ctx, lx, ly, 24 * SC, 24 * SC, '#FFD54A');
-  var px = thumbTitlePx(W * 0.88);
-  drawThumbTitle(ctx, THUMB_TEXT, W / 2, H * 0.10, px, '#FFF59D', '#1F2937', W * 0.88, 3, null);
+  drawThumbTitleFit(ctx, THUMB_TEXT, W / 2, H * 0.10, '#FFF59D', '#1F2937', W * 0.88, 3, H * 0.5, null, 'top');
 }
 function renderThumbnail() {
   var ctx = cv();
   ctx.clearRect(0, 0, W, H);
+  if (BG_IMG) {
+    // Nen la frame that tu phan canh hook: ve kin khung + lop toi nhe de
+    // chu noi, roi chi ve tieu de (khong ve nhan vat/khoi ve san nua).
+    // Tieu de dat o phia doi dien khung chu game: hook la thoai (khung
+    // chu tren) thi tieu de xuong duoi, hook la loi dan (khung chu duoi)
+    // thi tieu de len tren — khoi de len chu trong frame.
+    ctx.drawImage(BG_IMG, 0, 0, W, H);
+    R(ctx, 0, 0, W, H, 'rgba(0,0,0,0.25)');
+    var pos = (TITLE_POS === 'bottom') ? 'bottom' : 'top';
+    drawThumbTitleFit(ctx, THUMB_TEXT, W / 2, H * 0.10, '#FFFFFF', '#1F2937', W * 0.88, 3, H * 0.5, 'rgba(0,0,0,0.45)', pos);
+    return;
+  }
   if (STYLE === 'battle') renderThumbBattle(ctx);
   else if (STYLE === 'night') renderThumbNight(ctx);
   else if (STYLE === 'face') renderThumbFace(ctx);
@@ -693,16 +746,18 @@ function renderOutro(t) {
 window.renderIntro = renderIntro;
 window.renderOutro = renderOutro;
 window.renderThumbnail = renderThumbnail;
-window.__test = { FONT: FONT, wrapText: wrapText, drawText: drawText, drawTitleLetters: drawTitleLetters, drawCTA: drawCTA, drawThumbTitle: drawThumbTitle, textWidth: textWidth, STYLES: ['castle', 'village', 'battle', 'night'], THUMB_STYLES: ['castle', 'face', 'battle', 'night'] };
+window.__test = { FONT: FONT, wrapText: wrapText, drawText: drawText, drawTitleLetters: drawTitleLetters, drawCTA: drawCTA, drawThumbTitle: drawThumbTitle, fitTitle: fitTitle, drawThumbTitleFit: drawThumbTitleFit, textWidth: textWidth, STYLES: ['castle', 'village', 'battle', 'night'], THUMB_STYLES: ['castle', 'face', 'battle', 'night'] };
 </script></body></html>
 `;
 
-function buildPage(w, h, episodeTitle, style, thumbText) {
+function buildPage(w, h, episodeTitle, style, thumbText, bgDataUri, titlePos) {
   return PAGE_TEMPLATE
     .replace(/@@W@@/g, String(w))
     .replace(/@@H@@/g, String(h))
     .replace(/@@EPISODE@@/g, JSON.stringify(episodeTitle || ''))
     .replace(/@@THUMB@@/g, JSON.stringify(thumbText || episodeTitle || ''))
+    .replace(/@@BG@@/g, JSON.stringify(bgDataUri || ''))
+    .replace(/@@TITLE_POS@@/g, titlePos === 'bottom' ? 'bottom' : 'top')
     .replace(/@@STYLE@@/g, style);
 }
 
@@ -768,12 +823,23 @@ async function addMusic(silentPath, outPath, secs) {
 
 // Thumbnail 1280x720 (chuẩn YouTube), xuất JPG dưới 2MB (giới hạn của
 // YouTube cho ảnh tùy chỉnh): thử chất lượng 3 rồi 5, 7 nếu vẫn quá nặng.
-async function makeThumbnail(browser, episodeTitle, style, thumbText) {
-  const html = buildPage(1280, 720, episodeTitle, style, thumbText);
+async function makeThumbnail(browser, episodeTitle, style, thumbText, bgPath, titlePos) {
+  let bgDataUri = '';
+  if (bgPath && fs.existsSync(bgPath)) {
+    const mime = /\.png$/i.test(bgPath) ? 'image/png' : 'image/jpeg';
+    bgDataUri = 'data:' + mime + ';base64,' + fs.readFileSync(bgPath).toString('base64');
+    console.log('Nền thumbnail: frame thật ' + bgPath + ' (tiêu đề ở phía ' + (titlePos === 'bottom' ? 'dưới' : 'trên') + ').');
+  }
+  const html = buildPage(1280, 720, episodeTitle, style, thumbText, bgDataUri, titlePos);
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
   const page = await context.newPage();
   await page.setContent(html);
   await page.waitForFunction(() => typeof window.renderThumbnail === 'function');
+  try {
+    await page.waitForFunction(() => window.__bgReady === true, null, { timeout: 15000 });
+  } catch (_) {
+    console.log('  (ảnh nền tải chậm/lỗi — dùng nền vẽ sẵn.)');
+  }
   const dataUrl = await page.evaluate(() => {
     window.renderThumbnail();
     return document.getElementById('c').toDataURL('image/png');
@@ -797,7 +863,7 @@ async function main() {
   const episodeTitle = script.video_title || script.name || '';
   // Chữ trên thumbnail: ưu tiên câu hook ngắn do tác giả ghi
   // (video_thumbnail_text) vì chữ to mới thu hút; không có thì dùng tên
-  // tập (dài nên chữ sẽ nhỏ hơn, có thể bị cắt bớt bằng "...").
+  // tập — chữ sẽ tự co nhỏ để hiển thị đủ, không bị cắt bớt bằng "...".
   const thumbText = script.video_thumbnail_text || episodeTitle;
   if (!script.video_thumbnail_text) {
     console.log('  (gợi ý) kịch bản chưa có video_thumbnail_text nên thumbnail dùng tên tập — nên ghi 1 câu ngắn gọn, gây tò mò (vd "GODZILLA WANTS CAKE!") để chữ to và dễ đọc.');
@@ -825,7 +891,7 @@ async function main() {
       } else {
         console.log('Kiểu thumbnail: ' + style);
       }
-      await makeThumbnail(browser, episodeTitle, style, thumbText);
+      await makeThumbnail(browser, episodeTitle, style, thumbText, BG_PATH, TITLE_POS_ARG);
       return;
     }
     let style = STYLE_ARG;

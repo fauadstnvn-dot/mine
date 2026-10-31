@@ -149,11 +149,29 @@ Thumbnail tùy chỉnh + video Short:
              phải (mặt người là thứ mắt người xem dừng lại đầu tiên)
     battle - nền hoàng hôn rực + dải chữ vàng trên nền tối (kịch tính)
     night  - nền đêm + sao + chữ vàng nhạt phát sáng + nhân vật cầm đèn
+  Từ v1.15, NỀN thumbnail là 1 FRAME THẬT cắt từ phân cảnh hook của
+  chính video đó (tại mốc caption của câu hook), nên mỗi video có một
+  nền khác nhau — không còn na ná nhau như nền vẽ sẵn. Tiêu đề đặt ở
+  phía đối diện khung chữ game trong frame (hook là thoại thì khung chữ
+  ở trên nên tiêu đề xuống dưới, hook là lời dẫn thì ngược lại) và luôn
+  có dải nền tối sau chữ để đọc rõ trên nền ảnh. Không có hook hoặc cắt
+  frame lỗi thì tự quay về nền vẽ sẵn như trước. File nền (bg.jpg) nằm
+  trong artifact debug để anh xem đúng frame nào đã dùng.
   Chữ trên thumbnail lấy từ trường video_thumbnail_text của kịch bản:
   anh ghi 1 câu hook NGẮN GỌN, gây tò mò (câu phản diện đòi hỏi, cú
   twist, hoặc punchline buồn cười nhất — ví dụ "GODZILLA WANTS CAKE!").
-  Không có trường này thì thumbnail dùng tên tập (chữ nhỏ hơn, có thể
-  bị cắt bớt). Muốn tắt thumbnail thì điền ô thumbnail = false lúc chạy.
+  Không có trường này thì thumbnail dùng tên tập — từ v1.15 chữ sẽ tự
+  co nhỏ để hiển thị ĐỦ, không bị cắt thành "..." nữa (chỉ khi tên tập
+  cực dài mới cắt). Muốn tắt thumbnail thì điền ô thumbnail = false lúc chạy.
+  Bình luận kêu gọi tương tác (từ v1.15): sau khi đăng xong, workflow tự
+  đăng 1 bình luận dưới video chính VÀ dưới video Short, đăng dưới tên
+  kênh (tài khoản vừa đăng video đó). Nội dung: trích câu hook của tập
+  + câu hỏi "What was YOUR favorite moment...?" + kêu gọi LIKE và
+  SUBSCRIBE. Cần scope youtube.force-ssl trong token (anh đã bật). Bình
+  luận lỗi (thiếu scope, video made-for-kids hoặc tắt bình luận) thì
+  thôi — video vẫn giữ nguyên, job không hỏng. Lưu ý: YouTube Data API
+  KHÔNG có chức năng ghim (pin) bình luận, muốn ghim thì anh ghim tay
+  trong YouTube Studio sau khi video đăng xong.
   QUAN TRỌNG — xác minh kênh: YouTube chỉ cho đặt thumbnail tùy chỉnh
   khi kênh đã xác minh số điện thoại. Kênh chưa xác minh thì bước đăng
   thumbnail sẽ bị lỗi 403, nhưng job KHÔNG hỏng theo (bước này lỗi thì

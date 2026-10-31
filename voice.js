@@ -175,7 +175,11 @@ function hookWindow(lines, videoDur) {
   let end = nextT !== null ? Math.min(videoDur, nextT + 0.3) : Math.min(videoDur, lt + 6);
   if (end - start < 1.5) end = Math.min(videoDur, start + 3);
   if (end - start < 1.5) return null;
-  return { start, end, text: line.text, auto };
+  // lineTime: mốc caption (thời gian video) của chính câu hook — bước
+  // thumbnail dùng nó để cắt 1 frame thật từ phân cảnh hook làm nền.
+  // kind: 'say' (lời dẫn, khung chữ dưới) hay thoại (khung chữ trên) —
+  // bước thumbnail đặt tiêu đề ở phía đối diện để khỏi đè lên khung chữ.
+  return { start, end, text: line.text, auto, lineTime: lt, kind: line.kind || null };
 }
 
 // Xếp lịch phát giọng theo 2 chuỗi riêng: lời dẫn (kind 'say') xếp với
