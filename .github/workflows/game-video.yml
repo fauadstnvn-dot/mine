@@ -286,7 +286,14 @@ jobs:
           curl -fsSL "$KEYS_URL" -o keys.txt
           echo "Đã tải file key: $(grep -c . keys.txt) dòng"
 
+      # Chế độ chạy thử (max_frames != 0, vd 300 = ~10 giây): render chỉ
+      # phát đoạn đầu kịch bản nên captions.json không đủ mốc cho 49 câu
+      # — bước giọng mà chạy thì chắc chắn lỗi exit 3 (nó không đoán mò
+      # mốc thời gian). Vì vậy mọi bước sau render đều bỏ qua khi chạy
+      # thử, chỉ đăng video thử (không tiếng) lên Artifacts để anh xem
+      # game có chạy đúng không; muốn ra video thật thì chạy max_frames=0.
       - name: Tạo giọng + ráp vào video
+        if: ${{ inputs.max_frames == '0' }}
         run: |
           SCRIPT_NAME="$(node -p "require('./picked_meta.json').file")"
           node voice.js \
@@ -301,6 +308,7 @@ jobs:
             --meta-out upload_meta.json
 
       - name: Cắt đoạn hook (vài giây đoạn hay đặt sau intro)
+        if: ${{ inputs.max_frames == '0' }}
         run: |
           HOOK="$(node -p "JSON.stringify(require('./upload_meta.json').hook || null)")"
           if [ "$HOOK" != "null" ]; then
@@ -320,7 +328,7 @@ jobs:
       # bước ghép nên "${OUT}.mp4" lúc này vẫn là video chính (chưa có
       # intro/outro). Lỗi thì thôi (continue-on-error), chỉ mất Short.
       - name: Tạo video Short dọc từ đoạn hook
-        if: ${{ inputs.short != 'false' }}
+        if: ${{ inputs.short != 'false' && inputs.max_frames == '0' }}
         continue-on-error: true
         run: |
           SRC=""
@@ -345,7 +353,7 @@ jobs:
       # intro_outro.js cũng tự xóa cả 2 clip nếu lỗi giữa chừng để không
       # ghép lẻ 1 clip làm lệch chapters.
       - name: Tạo intro + outro phong cách xếp khối
-        if: ${{ inputs.intro_outro != 'false' }}
+        if: ${{ inputs.intro_outro != 'false' && inputs.max_frames == '0' }}
         continue-on-error: true
         run: |
           node intro_outro.js \
@@ -364,7 +372,7 @@ jobs:
       # video đó (bước intro đã lưu style vào upload_meta.json). Chỉ làm
       # ảnh, không đụng vào video; lỗi thì thôi, chỉ mất ảnh.
       - name: Tạo ảnh thumbnail tùy chỉnh
-        if: ${{ inputs.thumbnail != 'false' }}
+        if: ${{ inputs.thumbnail != 'false' && inputs.max_frames == '0' }}
         continue-on-error: true
         run: |
           node intro_outro.js \
@@ -374,6 +382,7 @@ jobs:
             --thumbnail-only
 
       - name: Ghép intro + hook + video chính + outro
+        if: ${{ inputs.max_frames == '0' }}
         run: |
           PARTS=()
           [ -f intro.mp4 ] && PARTS+=(intro.mp4)
@@ -399,12 +408,19 @@ jobs:
             echo "Chỉ có video chính, không cần ghép."
           fi
 
+      # Chạy thử (max_frames != 0) thì video chính không tồn tại, chỉ có
+      # video_silent.mp4 (video thử không tiếng) — đăng luôn file đó để
+      # anh xem game chạy đúng không. Chạy thật thì đăng cả 2 (video
+      # chính có tiếng + bản không tiếng để đối chiếu khi cần).
       - name: Đăng video thành phẩm
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OUT }}
-          path: ${{ env.OUT }}.mp4
+          path: |
+            ${{ env.OUT }}.mp4
+            video_silent.mp4
           retention-days: 30
+          if-no-files-found: ignore
 
       - name: Tính tên database (DB_NAME)
         run: |
@@ -419,7 +435,7 @@ jobs:
       # host/user/pass với FTP nên không cần thêm secret mới.
       - name: Đăng video lên YouTube
         id: upload_yt
-        if: ${{ inputs.yt_upload != 'false' }}
+        if: ${{ inputs.yt_upload != 'false' && inputs.max_frames == '0' }}
         env:
           DB_HOST: ${{ secrets.FTP_HOST }}
           DB_USER: ${{ secrets.FTP_USERNAME }}
@@ -509,7 +525,7 @@ jobs:
       # Artifacts để đăng tay nếu cần. Chạy thử với yt_upload=false thì
       # bước này cũng không chạy (kịch bản không bị chuyển oan).
       - name: Chuyển kịch bản sang kb_github_exp
-        if: ${{ success() && inputs.yt_upload != 'false' }}
+        if: ${{ success() && inputs.yt_upload != 'false' && inputs.max_frames == '0' }}
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
