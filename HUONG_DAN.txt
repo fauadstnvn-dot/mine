@@ -346,6 +346,10 @@ Cách chia key ElevenLabs hoạt động như thế nào?
     lại sang key khác, không tạo lại từ đầu.
 
 Nếu gặp lỗi:
+  - "spawn ffmpeg ENOENT" ở bước render: máy chạy không có sẵn ffmpeg.
+    Từ bản v1.11 workflow tự cài bằng apt nếu thiếu (bước "Cài ffmpeg")
+    nên lỗi này không còn xảy ra; nếu vẫn gặp thì kiểm tra xem máy chạy
+    có cho sudo apt hay không.
   - "Thư mục kb_github không còn kịch bản .json": đã làm hết, hoặc đường
     dẫn FTP sai (xem lại giá trị secret PROJECT_DIR trong mục B).
   - "Thư mục nhac_nen không có file nhạc .mp3": thư mục trống hoặc đường
