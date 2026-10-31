@@ -103,9 +103,9 @@ on:
         required: false
         default: ""
       img_format:
-        description: "png (nét nhất) hoặc jpeg (nhanh, nhẹ hơn)"
+        description: "jpeg (nhanh, đủ nét cho game hoạt hình) hoặc png (nét nhất, chậm hơn)"
         required: false
-        default: "png"
+        default: "jpeg"
       script:
         description: "Tên 1 kịch bản cụ thể (để trống = bốc ngẫu nhiên)"
         required: false
