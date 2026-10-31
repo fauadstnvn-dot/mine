@@ -48,6 +48,12 @@
 #     FTP_HOST     - vd: ftp.lop2b.click (hoặc IP của host)
 #     FTP_USERNAME - tài khoản FTP của host
 #     FTP_PASSWORD - mật khẩu FTP của host
+#     PROJECT_DIR  - đường dẫn FTP tới thư mục dự án trên host (thư mục
+#       chứa play.php, api.txt, kb_github, nhac_nen). Workflow tự suy ra
+#       3 thư mục con từ đây (kb_github, kb_github_exp, nhac_nen) nên
+#       không cần điền từng thư mục, và đường dẫn riêng của host không
+#       nằm trong code của repo. Thiếu secret này thì job dừng ngay từ
+#       đầu với thông báo rõ ràng.
 #   PROJECT_URL (anh đã thêm rồi — để ở Secrets hay Variables đều được,
 #   workflow tự tìm cả 2 chỗ, nếu chưa có thì điền vào ô project_url lúc
 #   bấm Run cũng được):
@@ -104,18 +110,6 @@ on:
         description: "Tên 1 kịch bản cụ thể (để trống = bốc ngẫu nhiên)"
         required: false
         default: ""
-      kb_dir:
-        description: "Thư mục kịch bản trên host (đường dẫn FTP)"
-        required: false
-        default: "kb_github"
-      kb_exp_dir:
-        description: "Thư mục chứa kịch bản đã dùng (đường dẫn FTP)"
-        required: false
-        default: "kb_github_exp"
-      music_dir:
-        description: "Thư mục nhạc nền trên host (đường dẫn FTP)"
-        required: false
-        default: "nhac_nen"
       music:
         description: "Tên 1 file nhạc cụ thể (để trống = bốc ngẫu nhiên)"
         required: false
@@ -223,13 +217,32 @@ jobs:
           echo "Game URL: ${PROJECT_URL%/}/play.php"
           echo "File key tự suy ra: ${PROJECT_URL%/}/api.txt"
 
+      # Đường dẫn thư mục dự án lấy từ secret PROJECT_DIR (không ghi cứng
+      # đường dẫn riêng của host vào repo cho bảo mật): 3 thư mục con
+      # (kb_github, kb_github_exp, nhac_nen) đều suy ra từ đây, khỏi cần
+      # điền từng ô lúc chạy. Thiếu secret thì dừng ngay từ đầu với thông
+      # báo rõ ràng, khỏi chạy tới bước bốc mới lỗi khó hiểu. Giá trị
+      # secret KHÔNG in ra log (GitHub cũng tự che secret trong log).
+      - name: Tính đường dẫn thư mục dự án (từ secret PROJECT_DIR)
+        run: |
+          BASE="${{ secrets.PROJECT_DIR }}"
+          if [ -z "$BASE" ]; then
+            echo "::error::Chưa đặt secret PROJECT_DIR. Vào repo -> Settings -> Secrets and variables -> Actions, thêm secret PROJECT_DIR = đường dẫn FTP tới thư mục dự án trên host (thư mục chứa play.php, api.txt, kb_github, nhac_nen)."
+            exit 1
+          fi
+          BASE="${BASE%/}"
+          echo "KB_DIR=$BASE/kb_github" >> "$GITHUB_ENV"
+          echo "KB_EXP_DIR=$BASE/kb_github_exp" >> "$GITHUB_ENV"
+          echo "MUSIC_DIR=$BASE/nhac_nen" >> "$GITHUB_ENV"
+          echo "Đã tính xong 3 đường dẫn từ PROJECT_DIR (kb_github, kb_github_exp, nhac_nen)."
+
       - name: Bốc kịch bản từ host qua FTP (ngẫu nhiên, hoặc đúng file đã chỉ định)
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
-          KB_DIR: ${{ inputs.kb_dir }}
-          KB_EXP_DIR: ${{ inputs.kb_exp_dir }}
+          KB_DIR: ${{ env.KB_DIR }}
+          KB_EXP_DIR: ${{ env.KB_EXP_DIR }}
         run: node pick_script.js --out picked_script.json --meta picked_meta.json --file "${{ inputs.script }}"
 
       - name: Bốc nhạc nền từ host qua FTP (ngẫu nhiên, hoặc đúng file đã chỉ định)
@@ -237,7 +250,7 @@ jobs:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
-          MUSIC_DIR: ${{ inputs.music_dir }}
+          MUSIC_DIR: ${{ env.MUSIC_DIR }}
         run: node pick_music.js --out picked_music.mp3 --meta picked_music_meta.json --file "${{ inputs.music }}"
 
       - name: Đặt tên video theo kịch bản được bốc
@@ -493,8 +506,8 @@ jobs:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
-          KB_DIR: ${{ inputs.kb_dir }}
-          KB_EXP_DIR: ${{ inputs.kb_exp_dir }}
+          KB_DIR: ${{ env.KB_DIR }}
+          KB_EXP_DIR: ${{ env.KB_EXP_DIR }}
         run: node pick_script.js --move --meta picked_meta.json
 
       # Dọn dẹp sau khi video đã lên YouTube thành công: video chính luôn
