@@ -174,10 +174,15 @@ Thumbnail tùy chỉnh + video Short:
   chỉ là 1 câu thoại nên thực tế luôn dưới 60s.
 
 Cài đặt 1 lần:
-  A. Trên host của anh:
-     - Tạo thư mục kb_github (chứa các kịch bản .json sẽ làm video).
-       Thư mục kb_github_exp không cần tạo trước, workflow tự tạo khi
-       chuyển file lần đầu (tài khoản FTP phải có quyền ghi).
+  A. Trên host của anh (thư mục dự án — thư mục chứa play.php):
+     - Tạo thêm thư mục kb_github (chứa các kịch bản .json sẽ làm video)
+       rồi bỏ kịch bản vào đó — thư mục này hiện chưa có, phải có thì
+       bước bốc kịch bản mới liệt kê được file. Thư mục kb_github_exp
+       (chứa kịch bản đã dùng) không cần tạo trước: workflow tự tạo khi
+       chuyển file lần đầu (tài khoản FTP phải có quyền ghi). Thư mục
+       nhac_nen (nhạc nền) đã có sẵn cùng cấp với play.php, chỉ cần bỏ
+       các file .mp3 vào đó. (Lưu ý: kb và kb_exp đã có sẵn trong ảnh
+       là thư mục khác, không phải thư mục của pipeline này.)
      - Tạo thư mục nhac_nen CÙNG CẤP với play.php, bỏ các file nhạc nền
        .mp3 vào đó. Mỗi lần chạy workflow bốc ngẫu nhiên 1 file trong đó
        làm nhạc nền (mức 20%, tự lặp tới hết video). Nhạc dùng lại nhiều
@@ -203,13 +208,21 @@ Cài đặt 1 lần:
        trò đùa BNB được dịch thành "Big Nommy Buns" để giữ nguyên viết
        tắt B-N-B).
   B. Trên GitHub (repo -> Settings -> Secrets and variables -> Actions):
-     - Secrets (bắt buộc, 3 cái — ANH ĐIỀN GIÁ TRỊ):
+     - Secrets (bắt buộc — ANH ĐIỀN GIÁ TRỊ):
          FTP_HOST     - vd: ftp.lop2b.click (hoặc IP của host)
          FTP_USERNAME - tài khoản FTP của host
          FTP_PASSWORD - mật khẩu FTP của host
-       (Workflow chỉ đọc 3 secret này qua secrets.FTP_*, không ghi mật khẩu
-       vào code hay log. Trong log, key ElevenLabs cũng chỉ hiện 4 ký tự
-       đầu và cuối để nhận biết.)
+         PROJECT_DIR  - đường dẫn FTP tới thư mục dự án trên host (thư
+                        mục chứa play.php, api.txt, kb_github, nhac_nen).
+                        Workflow tự suy ra 3 thư mục con từ đây:
+                        kb_github (bốc kịch bản), kb_github_exp (chứa
+                        kịch bản đã dùng), nhac_nen (nhạc nền) — khỏi
+                        cần điền từng thư mục. Đường dẫn này chỉ nằm
+                        trong secret, KHÔNG ghi vào code trong repo (cho
+                        bảo mật) và GitHub tự che nó trong log.
+       (Workflow chỉ đọc các secret này, không ghi mật khẩu hay đường
+       dẫn vào code hay log. Trong log, key ElevenLabs cũng chỉ hiện 4
+       ký tự đầu và cuối để nhận biết.)
      - PROJECT_URL (anh đã thêm rồi — để ở Secrets hay Variables đều được,
        workflow tự tìm cả 2 chỗ): link gốc tới dự án, vd:
        https://lop2b.click/mine. Workflow tự suy ra game ở
@@ -223,13 +236,14 @@ Cài đặt 1 lần:
        tên database: điền ô db_name lúc bấm Run, hoặc thêm DB_NAME vào
        Secrets hay Variables (workflow tự tìm cả 2 chỗ, ô nhập thắng).
        Cổng MySQL mặc định 3306, đổi bằng ô db_port nếu khác.
-     - Lưu ý đường dẫn FTP: KB_DIR mặc định là kb_github, tính từ thư mục
-       gốc khi đăng nhập FTP. Nếu host của anh chứa web ở sâu hơn, vd
-       public_html/mine, thì lúc chạy điền kb_dir = public_html/mine/kb_github
-       và kb_exp_dir = public_html/mine/kb_github_exp.
-       Thư mục nhạc cũng theo đúng quy tắc này: music_dir mặc định là
-       nhac_nen; nếu web ở public_html/mine thì điền
-       music_dir = public_html/mine/nhac_nen.
+     - Lúc bốc kịch bản, workflow ghi luôn 2 đường dẫn suy ra từ
+       PROJECT_DIR vào picked_meta.json nên bước chuyển file sau khi
+       đăng YouTube thành công chuyển đúng từ kb_github sang
+       kb_github_exp, không sợ bốc chỗ này mà chuyển chỗ khác. Nếu lần
+       chạy đầu báo không thấy thư mục thì khả năng là FTP đăng nhập
+       vào sâu hơn 1 cấp so với giá trị secret — lúc đó sửa lại giá trị
+       secret PROJECT_DIR (bỏ dấu / ở đầu hoặc rút gọn theo cấp FTP thực
+       tế) là xong, không cần sửa code.
   C. Đưa code lên GitHub:
      - Copy toàn bộ file trong bộ này vào THƯ MỤC GỐC của repo, giữ nguyên
        cấu trúc .github/workflows/game-video.yml, rồi commit + push.
@@ -333,7 +347,7 @@ Cách chia key ElevenLabs hoạt động như thế nào?
 
 Nếu gặp lỗi:
   - "Thư mục kb_github không còn kịch bản .json": đã làm hết, hoặc đường
-    dẫn FTP sai (xem lại mục B về public_html/mine).
+    dẫn FTP sai (xem lại giá trị secret PROJECT_DIR trong mục B).
   - "Thư mục nhac_nen không có file nhạc .mp3": thư mục trống hoặc đường
     dẫn FTP sai (xem lại mục B). Bước này chạy TRƯỚC khi render nên job
     dừng sớm, chưa tốn công render — thêm file .mp3 vào nhac_nen (hoặc

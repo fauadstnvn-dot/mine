@@ -2,11 +2,11 @@
 // sau khi video đã làm xong.
 //
 // Luồng:
-//   1. Lấy (pick): nối FTP, liệt kê thư mục KB_DIR (mặc định kb_github),
+//   1. Lấy (pick): nối FTP, liệt kê thư mục KB_DIR (workflow truyền từ secret PROJECT_DIR; chạy tay thì mặc định kb_github),
 //      lọc file .json, chọn NGẪU NHIÊN 1 file, tải về máy chạy workflow,
 //      ghi picked_meta.json {file, dir, expDir} để bước sau biết file nào.
 //   2. Chuyển (move, chỉ chạy khi video đã xong và đã đăng artifact):
-//      đổi tên file đó từ KB_DIR sang KB_EXP_DIR (mặc định kb_github_exp)
+//      đổi tên file đó từ KB_DIR sang KB_EXP_DIR (workflow truyền từ secret PROJECT_DIR; chạy tay thì mặc định kb_github_exp)
 //      bằng lệnh rename của FTP. Như vậy mỗi kịch bản chỉ làm video 1 lần.
 //      Nếu bước này lỗi thì job báo lỗi để anh biết mà xử lý tay, tránh
 //      lần chạy sau lại bốc trúng đúng file đó.
@@ -15,10 +15,8 @@
 //   FTP_HOST, FTP_USERNAME, FTP_PASSWORD (bắt buộc)
 //   FTP_PORT    (mặc định 21)
 //   FTP_SECURE  (mặc định false; đặt true nếu host yêu cầu FTPS)
-//   KB_DIR      (mặc định kb_github — đường dẫn FTP tới thư mục kịch bản,
-//                tính từ thư mục gốc khi đăng nhập FTP, vd nếu host chứa
-//                web ở public_html/mine thì ghi public_html/mine/kb_github)
-//   KB_EXP_DIR  (mặc định kb_github_exp, cùng quy tắc như trên)
+//   KB_DIR      (đường dẫn FTP tới thư mục kịch bản; workflow truyền từ secret PROJECT_DIR, chạy tay thì mặc định kb_github)
+//   KB_EXP_DIR  (cùng quy tắc như trên; chạy tay thì mặc định kb_github_exp)
 //
 // Cách dùng:
 //   node pick_script.js --out picked_script.json --meta picked_meta.json

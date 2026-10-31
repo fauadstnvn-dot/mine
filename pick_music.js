@@ -1,7 +1,7 @@
 // pick_music.js — Lấy nhạc nền ngẫu nhiên từ host qua FTP.
 //
 // Luồng:
-//   Nối FTP, liệt kê thư mục MUSIC_DIR (mặc định nhac_nen, nằm cùng cấp
+//   Nối FTP, liệt kê thư mục MUSIC_DIR (workflow truyền từ secret PROJECT_DIR; chạy tay thì mặc định nhac_nen, nằm cùng cấp
 //   với play.php trên host), lọc file .mp3, chọn NGẪU NHIÊN 1 file, tải
 //   về máy chạy workflow, ghi picked_music_meta.json {file, dir} để
 //   bước sau biết đã bốc bản nào (và để debug).
@@ -15,9 +15,7 @@
 //   pick_script.js)
 //   FTP_PORT    (mặc định 21)
 //   FTP_SECURE  (mặc định false; đặt true nếu host yêu cầu FTPS)
-//   MUSIC_DIR   (mặc định nhac_nen — đường dẫn FTP tới thư mục nhạc,
-//                tính từ thư mục gốc khi đăng nhập FTP, vd nếu host chứa
-//                web ở public_html/mine thì ghi public_html/mine/nhac_nen)
+//   MUSIC_DIR   (đường dẫn FTP tới thư mục nhạc; workflow truyền từ secret PROJECT_DIR, chạy tay thì mặc định nhac_nen)
 //
 // Cách dùng:
 //   node pick_music.js --out picked_music.mp3 --meta picked_music_meta.json
