@@ -123,9 +123,9 @@ on:
         required: false
         default: "true"
       yt_privacy:
-        description: "Chế độ công khai của video trên YouTube"
+        description: "Chế độ công khai của video trên YouTube (mặc định private; nếu hẹn giờ thì video private tới giờ hẹn rồi tự public)"
         required: false
-        default: "public"
+        default: "private"
         type: choice
         options:
           - public
@@ -140,9 +140,9 @@ on:
         required: false
         default: "false"
       yt_publish_at:
-        description: "Giờ phát hành theo giờ UTC, dạng HH:MM (để trống = đăng ngay; có giờ thì video lên private trước rồi tự public đúng giờ)"
+        description: "Giờ phát hành theo giờ UTC, dạng HH:MM (mặc định 19:30 = 02:30 sáng giờ VN hôm sau; video lên private trước rồi tự public đúng giờ; để trống = đăng ngay theo yt_privacy)"
         required: false
-        default: ""
+        default: "19:30"
       db_name:
         description: "Tên database chứa bảng tb_bao_secret (để trống = dùng DB_NAME đã thêm vào GitHub)"
         required: false
