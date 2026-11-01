@@ -393,7 +393,7 @@ async function main() {
       fs.writeFileSync(rawPath, audio);
     } catch (e) {
       if (e.isQuota) {
-        console.log(`Key ${mask(key)} hết quota giữa chừng ở câu ${i + 1}, chia lại các câu còn lại...`);
+        console.log(`Key ${mask(key)} hết quota giữa chừng ở câu ${i + 1} (${e.message}), chia lại các câu còn lại...`);
         usable[keyIdx].remaining = 0;
         const rest = lines.map((l, idx) => ({ l, idx })).filter(({ idx }) => !generated[idx]);
         const sub = planLines(rest.map((x) => x.l), usable);
