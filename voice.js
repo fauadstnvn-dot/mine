@@ -505,7 +505,7 @@ async function main() {
   let muxFilter = null;
   if (MUSIC) {
     muxArgs.push('-stream_loop', '-1', '-i', MUSIC);
-    muxFilter = `[1:a]volume=1.0[v];[2:a]volume=${MUSIC_VOL},apad[m];[m][v]sidechaincompress=threshold=0.05:ratio=4:attack=20:release=500[md];[v][md]amix=inputs=2:normalize=0:duration=first:dropout_transition=0[a]`;
+    muxFilter = `[1:a]volume=1.0,asplit=2[v1][v2];[2:a]volume=${MUSIC_VOL},apad[m];[m][v1]sidechaincompress=threshold=0.05:ratio=4:attack=20:release=500[md];[v2][md]amix=inputs=2:normalize=0:duration=first:dropout_transition=0[a]`;
     muxArgs.push('-filter_complex', muxFilter, '-map', '0:v', '-map', '[a]');
   } else {
     muxArgs.push('-map', '0:v', '-map', '1:a');
