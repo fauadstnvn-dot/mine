@@ -74,7 +74,7 @@ MAX_NUM = 9
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"
 THUMB_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
-COMMENT_URL = "https://www.googleapis.com/youtube/v3/comments"
+COMMENT_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
 HAS_TOKEN = f"{TOKEN_COLUMN} IS NOT NULL AND TRIM({TOKEN_COLUMN}) <> ''"
 
 
@@ -243,7 +243,7 @@ def build_comment(kind: str, meta: dict) -> str:
 
 
 def post_comment(access_token: str, video_id: str, text: str) -> str:
-    """Dang 1 binh luan (comments.insert) len video cua chinh kenh do.
+    """Dang 1 binh luan moi (commentThreads.insert) len video cua chinh kenh do.
     Can scope youtube.force-ssl trong token. Tra ve comment id. Loi 403
     thuong la thieu scope, video 'made for kids' hoac video tat binh luan."""
     r = requests.post(COMMENT_URL, params={"part": "snippet"},
@@ -253,7 +253,7 @@ def post_comment(access_token: str, video_id: str, text: str) -> str:
                                         "topLevelComment": {"snippet": {"textOriginal": text}}}},
                       timeout=60)
     if r.status_code != 200:
-        raise AccountError(f"comments.insert HTTP {r.status_code}: {r.text[:300]}")
+        raise AccountError(f"commentThreads.insert HTTP {r.status_code}: {r.text[:300]}")
     return r.json().get("id", "")
 
 
