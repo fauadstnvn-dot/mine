@@ -328,7 +328,10 @@ Kịch bản cần có gì? (để đăng YouTube)
   giới hạn tổng tag 450 ký tự, tag thừa sẽ bị bỏ. Không có video_tags
   thì video đăng lên không có tag, vẫn xem bình thường.
   File mẫu tiếng Anh đi kèm (binance_godzilla_v15_voice_pitch_en.json)
-  đã có sẵn video_tags (15 tag) để anh lấy làm mẫu.
+  đã có sẵn video_title/video_description/video_tags (15 tag) để anh lấy
+  làm mẫu. Từ v1.16, 3 file v9 (godzilla_phan2_hacker_thoi_mien_v9*.json)
+  cũng đã có đủ 4 trường video_title/video_description/video_tags/
+  video_thumbnail_text.
 
   Mốc thời gian các phân cảnh (chapter) trong mô tả:
   Anh KHÔNG cần ghi số giây tay — số giây phụ thuộc lúc render, pipeline
@@ -459,20 +462,23 @@ Tùy chọn thêm:
     nhạc lấn). Muốn đổi mức thì sửa ô music_volume lúc chạy; muốn 1 bản
     cụ thể thì điền tên file vào ô music. Chạy riêng voice.js thì dùng cờ
     --music <file> --music-volume 0.2.
-  - Đăng YouTube: mặc định video lên public, danh mục Gaming (20), không
-    đánh dấu dành cho trẻ em. Muốn đổi thì sửa lúc chạy: yt_privacy =
-    unlisted/private, yt_category = ID danh mục khác, yt_made_for_kids =
-    true (chỉ bật khi video thật sự hướng tới trẻ em — bật sai có thể bị
-    YouTube xử lý), yt_publish_at = HH:MM theo giờ UTC (vd muốn phát hành
-    09:00 giờ VN thì điền 02:00; video sẽ lên private trước rồi tự public
-    đúng giờ; nếu giờ đó cách lúc chạy chưa tới 20 phút thì đăng ngay).
+  - Đăng YouTube (từ v1.16): mặc định video lên private rồi tự public
+    lúc 02:30 sáng giờ VN hôm sau (yt_publish_at mặc định 19:30 UTC; video
+    chính và Short cùng hẹn giờ này). Muốn đăng ngay thì để trống
+    yt_publish_at và đặt yt_privacy = public; muốn giờ khác thì điền
+    HH:MM UTC (vd 09:00 giờ VN thì điền 02:00). Nếu giờ hẹn cách lúc chạy
+    chưa tới 20 phút thì dời sang hôm sau (không đăng ngay như bản cũ).
+    Danh mục mặc định Gaming (20), không đánh dấu dành cho trẻ em; muốn
+    đổi thì sửa lúc chạy: yt_privacy = unlisted/private, yt_category = ID
+    danh mục khác, yt_made_for_kids = true (chỉ bật khi video thật sự
+    hướng tới trẻ em — bật sai có thể bị YouTube xử lý).
     Muốn xem trước tiêu đề/tag mà không đăng thì chạy riêng trên máy:
     python upload_youtube.py --video <ten>.mp4 --meta upload_meta.json
     --dry-run (không cần database, chỉ in tiêu đề/tags và ghi file
     <ten>.youtube.json).
-  - Pipeline không làm thumbnail riêng cho video — YouTube sẽ tự chọn 1
-    khung hình trong video làm ảnh đại diện. Muốn thumbnail riêng thì
-    thêm bước sau (chụp frame đẹp từ video rồi dùng thumbnails.set).
+  - Thumbnail (từ v1.15): pipeline tự đặt thumbnail từ 1 frame thật ở
+    phân cảnh hook (chữ tự co cho vừa khung); cần kênh đã xác minh số điện
+    thoại, chưa xác minh sẽ bị 403 nhưng video vẫn lên bình thường.
   - Muốn nhẹ/nhanh hơn nữa: giảm fps xuống 24, hoặc giảm width/height
     xuống 1920x1080 (img_format mặc định đã là jpeg từ bản v1.13).
   - Muốn dùng kịch bản khác: chỉ cần file JSON đó cũng có trường pitch
