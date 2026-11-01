@@ -337,16 +337,21 @@ def add_chapters(description: str, chapters: list) -> str:
 
 
 def next_publish_at(hhmm: str) -> str | None:
-    """Next occurrence of HH:MM UTC as RFC3339, or None if empty/invalid/less than 20 minutes away."""
+    """Next occurrence of HH:MM UTC as RFC3339, or None if empty/invalid.
+    If today's slot is less than 20 minutes away (or already passed), the
+    NEXT day's slot is used, so a video is never scheduled in the past or
+    before it can finish processing (v1.16: previously this returned None,
+    which uploaded immediately instead of waiting for the next slot)."""
     try:
         h, m = (int(x) for x in hhmm.strip().split(":"))
     except ValueError:
         return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
     now = datetime.now(timezone.utc)
     target = now.replace(hour=h, minute=m, second=0, microsecond=0)
     if target - now < timedelta(minutes=20):
-        # Today's slot is (almost) gone: release now rather than wait a full day.
-        return None
+        target += timedelta(days=1)
     return target.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
