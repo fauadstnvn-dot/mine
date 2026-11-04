@@ -238,29 +238,40 @@ function fallbackPitch(kind, speaker) {
 }
 
 // ---- 2. Khớp caption với câu ----
+// FIX 2026-11-05 (v22): trước đây chỉ nhìn trước tối đa 3 câu (j+4). Một khoảng
+// caption thiếu dài hơn 3 câu (vd 1 đoạn chuyển cảnh bị mất caption, hoặc 1
+// bước kịch bản lỗi làm render dừng rồi lại... không — nếu render dừng hẳn thì
+// caption sau đó cũng không có, vẫn exit 3 đúng) sẽ làm lệch toàn bộ các câu
+// còn lại: caption khớp tiếp theo nằm ngoài tầm nhìn 3 câu nên bị coi là
+// "caption lạ", j không tiến nữa, và MỌI câu sau đó đều bị báo không khớp,
+// dù caption của chúng vẫn có trong captions.json. Bản này tìm trong toàn bộ
+// các câu còn lại, nên danh sách không khớp chỉ đúng các câu thật sự thiếu
+// caption, và log sẽ chỉ rõ câu đầu tiên thiếu + câu cuối cùng khớp được.
+// Lưu ý: vẫn exit 3 khi có câu không khớp — không đoán mò mốc thời gian.
 function matchCaptions(lines, captions) {
   const unmatchedLines = [];
   const extraCaptions = [];
   let j = 0;
+  let lastMatched = -1;
   for (const cap of captions) {
     const cn = norm(cap.text);
     if (j < lines.length && norm(lines[j].text) === cn) {
-      lines[j].time = cap.t; j++;
+      lines[j].time = cap.t; lastMatched = j; j++;
       continue;
     }
     let found = -1;
-    for (let k = j + 1; k < Math.min(lines.length, j + 4); k++) {
+    for (let k = j + 1; k < lines.length; k++) {
       if (norm(lines[k].text) === cn) { found = k; break; }
     }
     if (found >= 0) {
       for (let k = j; k < found; k++) unmatchedLines.push(lines[k]);
-      lines[found].time = cap.t; j = found + 1;
+      lines[found].time = cap.t; lastMatched = found; j = found + 1;
     } else {
       extraCaptions.push(cap); // caption lạ của game, bỏ qua
     }
   }
   for (; j < lines.length; j++) unmatchedLines.push(lines[j]);
-  return { unmatchedLines, extraCaptions };
+  return { unmatchedLines, extraCaptions, firstUnmatched: unmatchedLines.length ? lines.indexOf(unmatchedLines[0]) : -1, lastMatched };
 }
 
 // ---- 3. Key + quota ----
@@ -334,10 +345,12 @@ async function main() {
   console.log(`Kịch bản: ${lines.length} câu thoại, tổng ${lines.reduce((a, l) => a + charsOf(l.text), 0)} ký tự.`);
   console.log(`Caption bắt được: ${capData.captions.length} mốc.`);
 
-  const { unmatchedLines, extraCaptions } = matchCaptions(lines, capData.captions);
+  const { unmatchedLines, extraCaptions, firstUnmatched, lastMatched } = matchCaptions(lines, capData.captions);
   console.log(`Caption lạ bỏ qua: ${extraCaptions.length}`);
   if (unmatchedLines.length) {
-    console.error('KHỚP THẤT BẠI: ' + unmatchedLines.length + ' câu không có mốc thời gian:');
+    const matchedCount = lines.filter((l) => typeof l.time === 'number').length;
+    console.error('KHỚP THẤT BẠI: ' + unmatchedLines.length + ' câu không có mốc thời gian (trên tổng ' + lines.length + ' câu, khớp được ' + matchedCount + ' câu, caption bắt được ' + capData.captions.length + ' mốc).');
+    if (firstUnmatched >= 0) console.error('Câu đầu tiên không khớp: #' + (firstUnmatched + 1) + ' "' + String(lines[firstUnmatched].text).slice(0, 100) + '" — câu cuối cùng khớp được: #' + (lastMatched + 1) + '. Nếu câu đầu tiên không khớp nằm ngay sau 1 bước go/move/scene thì bước đó đã lỗi trong game (xem log bước Render, dòng [KB] Error at step ...), render đã dừng sớm và caption sau đó không có — sửa bước đó trong kịch bản, đừng sửa voice.js.');
     for (const l of unmatchedLines.slice(0, 20)) console.error('  - ' + String(l.text).slice(0, 100));
     console.error('DỪNG để tránh video lệch tiếng. Kiểm tra lại captions.json / kịch bản.');
     process.exit(3);
