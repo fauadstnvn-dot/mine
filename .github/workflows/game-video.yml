@@ -181,7 +181,7 @@ jobs:
     permissions:
       contents: read
       actions: write
-    timeout-minutes: 300
+    timeout-minutes: 360
     steps:
       - name: Lấy code
         uses: actions/checkout@v4
