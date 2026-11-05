@@ -142,44 +142,108 @@ function extractLines(script) {
 // true vào câu say/talk hoặc dòng dialogue) — chính người viết kịch bản
 // mới biết đoạn nào gây tò mò, buồn cười hay kịch tính nhất (thường là
 // câu thách thức của nhân vật phản diện, cú twist, hay câu punchline).
-// Nếu không có câu nào được đánh dấu thì máy đoán: câu thoại đầu tiên của
-// nhân vật (không phải lời dẫn) có dấu "!" và nằm sau 25% video — thường
-// là câu đòi hỏi, hăm dọa hay cao trào. Đoán chỉ là dự phòng, log sẽ ghi
-// rõ là tự chọn để lần sau đánh dấu tay cho chắc.
-// Trả về {start, end, text, auto} hoặc null (không có hook). Cửa sổ cắt:
-// từ 0.5s trước câu đến 0.3s sau câu kế tiếp (hoặc +6s nếu là câu cuối).
-function hookWindow(lines, videoDur) {
+// Từ bản Short nhiều cảnh: gắn "hook": true cho NHIỀU câu thì mỗi câu
+// thành 1 phân cảnh trong Short (xem hookWindows). Nếu không có câu nào
+// được đánh dấu thì máy đoán 1 câu như cũ.
+// Cửa sổ cắt mỗi cảnh: từ 0.5s trước câu đến 0.3s sau câu kế tiếp (hoặc
+// +6s nếu là câu cuối), tối đa 15s/cảnh, tối thiểu 1.5s. Tổng mọi cảnh
+// luôn bị khống chế dưới 60s (giới hạn 58s, cắt bớt từ cảnh cuối ngược
+// lên) nên Short không bao giờ vượt giới hạn của YouTube.
+// hookWindows(lines, videoDur) trả về mảng cửa sổ đã sắp xếp theo thời
+// gian, mỗi cửa sổ {start, end, text, auto, lineTime, kind, trimmed};
+// mảng còn mang thêm 2 thuộc tính totalSeconds và trimmedTotal.
+// hookWindow(lines, videoDur) giữ nguyên như cũ: chỉ trả về cửa sổ đầu
+// tiên (hoặc null) để bước thumbnail/teaser 1 cảnh không bị đổi hành vi.
+const MAX_SHORT_SECONDS = 58; // Short phải < 60s (YouTube); giữ 58s làm biên an toàn
+const MAX_HOOK_WINDOW_SECONDS = 15; // tối đa 15s cho mỗi phân cảnh hook
+const MIN_HOOK_WINDOW_SECONDS = 1.5;
+
+function hookWindows(lines, videoDur) {
   // Mốc dùng để cắt hook: ưu tiên mốc ĐÃ XẾP LỊCH (start) vì đó mới là
   // lúc câu thoại thật sự phát ra trong video cuối; chưa xếp lịch thì
   // dùng mốc caption (time) như cũ.
   const tOf = (l) => (typeof l.start === 'number' ? l.start : l.time);
-  let idx = -1;
+  // 1 cửa sổ cho 1 câu hook: [lt-0.5, câu kế +0.3 hoặc lt+6], tối thiểu
+  // 1.5s (kéo dài tới start+3 nếu quá ngắn), tối đa 15s.
+  const buildWindow = (idx, auto) => {
+    const line = lines[idx];
+    let nextT = null;
+    for (let j = idx + 1; j < lines.length; j++) {
+      if (typeof tOf(lines[j]) === 'number') { nextT = tOf(lines[j]); break; }
+    }
+    const lt = tOf(line);
+    const start = Math.max(0, lt - 0.5);
+    let end = nextT !== null ? Math.min(videoDur, nextT + 0.3) : Math.min(videoDur, lt + 6);
+    if (end - start < MIN_HOOK_WINDOW_SECONDS) end = Math.min(videoDur, start + 3);
+    if (end - start < MIN_HOOK_WINDOW_SECONDS) return null;
+    let trimmed = false;
+    if (end - start > MAX_HOOK_WINDOW_SECONDS) { end = start + MAX_HOOK_WINDOW_SECONDS; trimmed = true; }
+    // lineTime: mốc caption (thời gian video) của chính câu hook — bước
+    // thumbnail dùng nó để cắt 1 frame thật từ phân cảnh hook làm nền.
+    // kind: 'say' (lời dẫn, khung chữ dưới) hay thoại (khung chữ trên) —
+    // bước thumbnail đặt tiêu đề ở phía đối diện để khỏi đè lên khung chữ.
+    return { start, end, text: line.text, auto, lineTime: lt, kind: line.kind || null, trimmed };
+  };
+  // Lấy TẤT CẢ câu đã đánh dấu hook (theo thứ tự kịch bản).
+  const marked = [];
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].hook && typeof tOf(lines[i]) === 'number') { idx = i; break; }
+    if (lines[i].hook && typeof tOf(lines[i]) === 'number') marked.push(i);
   }
   let auto = false;
-  if (idx < 0) {
+  if (!marked.length) {
+    // Không có câu nào được đánh dấu: máy đoán 1 câu như cũ — câu thoại
+    // đầu tiên của nhân vật (không phải lời dẫn) có dấu "!" và nằm sau
+    // 25% video.
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
-      if (l.kind !== 'say' && typeof tOf(l) === 'number' && tOf(l) > videoDur * 0.25 && /!/.test(l.text)) { idx = i; auto = true; break; }
+      if (l.kind !== 'say' && typeof tOf(l) === 'number' && tOf(l) > videoDur * 0.25 && /!/.test(l.text)) { marked.push(i); auto = true; break; }
     }
   }
-  if (idx < 0) return null;
-  const line = lines[idx];
-  let nextT = null;
-  for (let j = idx + 1; j < lines.length; j++) {
-    if (typeof tOf(lines[j]) === 'number') { nextT = tOf(lines[j]); break; }
+  if (!marked.length) return Object.assign([], { totalSeconds: 0, trimmedTotal: false });
+  let wins = [];
+  for (const idx of marked) {
+    const w = buildWindow(idx, auto);
+    if (w) wins.push(w);
   }
-  const lt = tOf(line);
-  const start = Math.max(0, lt - 0.5);
-  let end = nextT !== null ? Math.min(videoDur, nextT + 0.3) : Math.min(videoDur, lt + 6);
-  if (end - start < 1.5) end = Math.min(videoDur, start + 3);
-  if (end - start < 1.5) return null;
-  // lineTime: mốc caption (thời gian video) của chính câu hook — bước
-  // thumbnail dùng nó để cắt 1 frame thật từ phân cảnh hook làm nền.
-  // kind: 'say' (lời dẫn, khung chữ dưới) hay thoại (khung chữ trên) —
-  // bước thumbnail đặt tiêu đề ở phía đối diện để khỏi đè lên khung chữ.
-  return { start, end, text: line.text, auto, lineTime: lt, kind: line.kind || null };
+  wins.sort((a, b) => a.start - b.start);
+  // Gộp các cửa sổ chồng nhau hoặc sát nhau (cách nhau < 0.5s) thành 1.
+  const merged = [];
+  for (const w of wins) {
+    const last = merged[merged.length - 1];
+    if (last && w.start - last.end < 0.5) {
+      last.end = Math.max(last.end, w.end);
+      if (last.end - last.start > MAX_HOOK_WINDOW_SECONDS) { last.end = last.start + MAX_HOOK_WINDOW_SECONDS; last.trimmed = true; }
+    } else merged.push(w);
+  }
+  wins = merged;
+  // Khống chế tổng dưới 60s: cắt bớt từ cảnh CUỐI ngược lên, mỗi cảnh
+  // giữ tối thiểu 1.5s; vẫn thừa thì bỏ hẳn từng cảnh từ cuối (không bao
+  // giờ bỏ cảnh đầu tiên).
+  let total = wins.reduce((t, w) => t + (w.end - w.start), 0);
+  let trimmedTotal = false;
+  if (total > MAX_SHORT_SECONDS) {
+    trimmedTotal = true;
+    for (let i = wins.length - 1; i >= 0 && total > MAX_SHORT_SECONDS; i--) {
+      const w = wins[i];
+      const canCut = (w.end - w.start) - MIN_HOOK_WINDOW_SECONDS;
+      if (canCut > 0) {
+        const cut = Math.min(canCut, total - MAX_SHORT_SECONDS);
+        w.end -= cut;
+        total -= cut;
+        w.trimmed = true;
+      }
+    }
+    while (total > MAX_SHORT_SECONDS && wins.length > 1) {
+      const w = wins.pop();
+      total -= (w.end - w.start);
+    }
+  }
+  return Object.assign(wins, { totalSeconds: total, trimmedTotal });
+}
+
+function hookWindow(lines, videoDur) {
+  const wins = hookWindows(lines, videoDur);
+  return wins.length ? wins[0] : null;
 }
 
 // Xếp lịch phát giọng theo 2 chuỗi riêng: lời dẫn (kind 'say') xếp với
@@ -545,12 +609,16 @@ async function main() {
   // mảng rỗng, bước đăng sẽ không gắn tag. Chapter: các câu mang trường
   // chapter sẽ thành mốc thời gian trong mô tả (bước đăng tự chèn khối
   // Timestamps, chỉ khi có từ 3 mốc trở lên và cách nhau tối thiểu 10
-  // giây). Hook: cửa sổ vài giây đoạn hay để đặt sau intro (xem
-  // hookWindow); bước cắt hook và bước ghép sẽ dùng nó, rồi cộng độ dài
-  // hook vào chapters.
-  const hook = hookWindow(lines, outDur);
-  if (hook) console.log(`Hook: câu "${String(hook.text).slice(0, 80)}" từ ${hook.start.toFixed(2)}s đến ${hook.end.toFixed(2)}s (${hook.auto ? 'máy tự chọn' : 'đã đánh dấu'}).`);
-  else console.log('Hook: không có đoạn hay (muốn có thì gắn "hook": true vào 1 câu thoại).');
+  // giây). Hook: các cửa sổ đoạn hay để đặt sau intro (xem hookWindows
+  // — nhiều câu đánh dấu thì thành nhiều phân cảnh Short, tổng luôn
+  // khống chế ≤ 58s); bước cắt hook và bước ghép sẽ dùng nó, rồi cộng
+  // tổng độ dài hook vào chapters.
+  const hooks = hookWindows(lines, outDur);
+  const hook = hooks[0] || null;
+  if (hook) {
+    hooks.forEach((h, i) => console.log(`Hook ${i + 1}/${hooks.length}: câu "${String(h.text).slice(0, 80)}" từ ${h.start.toFixed(2)}s đến ${h.end.toFixed(2)}s (${h.auto ? 'máy tự chọn' : 'đã đánh dấu'}${h.trimmed ? ', đã cắt ngắn' : ''}).`));
+    console.log(`Tổng hook: ${hooks.totalSeconds.toFixed(2)}s (${hooks.length} phân cảnh${hooks.trimmedTotal ? ', đã cắt bớt để Short dưới 60s' : ''}).`);
+  } else console.log('Hook: không có đoạn hay (muốn có thì gắn "hook": true vào 1 câu thoại).');
   const uploadMeta = {
     video: path.basename(VIDEO_OUT),
     script: SCRIPT_NAME || path.basename(SCRIPT_PATH),
@@ -559,7 +627,9 @@ async function main() {
     tags: Array.isArray(script.video_tags) ? script.video_tags : [],
     chapters: lines.filter((l) => l.chapter && typeof l.time === 'number')
       .map((l) => ({ t: l.time, title: l.chapter })),
-    hook: hook ? { start: hook.start, end: hook.end, text: hook.text, auto: hook.auto } : null
+    hook: hook ? { start: hook.start, end: hook.end, text: hook.text, auto: hook.auto } : null,
+    hooks: hooks.map((h) => ({ start: h.start, end: h.end, text: h.text, auto: h.auto, lineTime: h.lineTime, kind: h.kind, trimmed: !!h.trimmed })),
+    shortTotalSeconds: hooks.totalSeconds
   };
   if (uploadMeta.chapters.length) console.log(`Chương: ${uploadMeta.chapters.length} mốc phân cảnh (${uploadMeta.chapters.map((c) => c.title).join(' | ')}).`);
   fs.writeFileSync(META_OUT, JSON.stringify(uploadMeta, null, 2), 'utf-8');
@@ -569,4 +639,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error('VOICE THẤT BẠI:', e && e.stack || e); process.exit(1); });
-module.exports = { extractLines, matchCaptions, hookWindow, scheduleLines, fallbackPitch };
+module.exports = { extractLines, matchCaptions, hookWindow, hookWindows, scheduleLines, fallbackPitch, MAX_SHORT_SECONDS };
