@@ -191,6 +191,24 @@ Thumbnail tùy chỉnh + video Short:
   Short nữa (YouTube xếp thành video dọc thường) — nhưng hook thường
   chỉ là 1 câu thoại nên thực tế luôn dưới 60s.
 
+  Short nhiều phân cảnh (hook nhiều cảnh — từ bản này):
+    Muốn Short gồm nhiều cảnh hay nối lại với nhau thì gắn "hook": true
+    cho NHIỀU câu thoại ở các phân cảnh khác nhau trong kịch bản (mỗi
+    câu là 1 cảnh). Pipeline cắt từng cảnh rồi nối lại thành 1 Short:
+      - Mỗi cảnh cắt từ 0.5s trước câu hook đến 0.3s sau câu kế tiếp
+        (câu cuối thì +6s), tối đa 15s mỗi cảnh, tối thiểu 1.5s; 2 cảnh
+        sát nhau (cách nhau dưới 0.5s) tự gộp thành 1 cảnh.
+      - Tổng mọi cảnh luôn bị khống chế dưới 60s: giới hạn 58s, nếu
+        vượt thì tự cắt ngắn từ cảnh CUỐI ngược lên (mỗi cảnh giữ tối
+        thiểu 1.5s), vẫn thừa thì bỏ hẳn từng cảnh từ cuối — cảnh đầu
+        tiên không bao giờ bị bỏ. Short sau khi dựng dọc còn được đo
+        lại 1 lần nữa: nếu vẫn ≥ 60s thì cắt cứng còn 58s.
+      - Đoạn hook nối nhiều cảnh này cũng là đoạn teaser đặt sau intro
+        trong video dài (chapters tự cộng thêm đúng tổng độ dài hook).
+    Chỉ đánh dấu 1 câu hook thì mọi thứ chạy y như trước (1 cảnh).
+    Không đánh dấu câu nào thì máy tự đoán 1 cảnh như cũ; Short vẫn
+    lấy 15s đầu video chính khi không có hook nào.
+
 Cài đặt 1 lần:
   A. Trên host của anh (thư mục dự án — thư mục chứa play.php):
      - Tạo thêm thư mục kb_github (chứa các kịch bản .json sẽ làm video)
