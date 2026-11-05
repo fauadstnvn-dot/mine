@@ -310,23 +310,81 @@ jobs:
       - name: Cắt đoạn hook (vài giây đoạn hay đặt sau intro)
         if: ${{ inputs.max_frames == '0' }}
         run: |
-          HOOK="$(node -p "JSON.stringify(require('./upload_meta.json').hook || null)")"
-          if [ "$HOOK" != "null" ]; then
-            START="$(node -p "require('./upload_meta.json').hook.start")"
-            DUR="$(node -p "require('./upload_meta.json').hook.end - require('./upload_meta.json').hook.start")"
-            ffmpeg -y -v error -ss "$START" -i "${OUT}.mp4" -t "$DUR" -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k hook.mp4
-            node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('upload_meta.json','utf-8'));const d=m.hook.end-m.hook.start;if(Array.isArray(m.chapters)){m.chapters=m.chapters.map(c=>({t:c.t+d,title:c.title}));}fs.writeFileSync('upload_meta.json',JSON.stringify(m,null,2));console.log('Đã cộng '+d.toFixed(2)+'s (hook) vào chapters.');"
-            echo "Đã cắt hook: từ ${START}s, dài ${DUR}s."
-          else
-            echo "Không có hook (chưa đánh dấu và máy không đoán được) — bỏ qua, video không có đoạn teaser."
-          fi
+          # Short nhiều phân cảnh: cắt từng cửa sổ trong upload_meta.json
+          # (hooks[] — voice.js đã khống chế tổng ≤ 58s), rồi nối lại thành
+          # hook.mp4. Meta cũ chỉ có hook đơn thì dùng nó như trước. Đoạn
+          # nào cắt lỗi thì bỏ qua đoạn đó, các đoạn còn lại vẫn nối bình
+          # thường; không cắt được đoạn nào thì video không có teaser.
+          # (export để node trong heredoc đọc được qua process.env)
+          export FPS="${{ inputs.fps }}" WIDTH="${{ inputs.width }}" HEIGHT="${{ inputs.height }}"
+          node <<'EOF'
+          const fs = require('fs');
+          const { execFileSync, spawnSync } = require('child_process');
+          const OUT = process.env.OUT;
+          const m = JSON.parse(fs.readFileSync('upload_meta.json', 'utf-8'));
+          let hooks = Array.isArray(m.hooks) && m.hooks.length ? m.hooks : (m.hook ? [m.hook] : []);
+          hooks = hooks.filter((h) => h && typeof h.start === 'number' && typeof h.end === 'number' && h.end > h.start);
+          if (!hooks.length) { console.log('Không có hook (chưa đánh dấu và máy không đoán được) — bỏ qua, video không có đoạn teaser.'); process.exit(0); }
+          // Phòng thủ ở tầng workflow: nếu meta cũ/chưa cắt (tổng hook
+          // vượt 58s) thì cắt ngay tại đây — cắt ngắn từ cửa sổ cuối ngược
+          // lên (tối thiểu 1.5s/cảnh), rồi bỏ hẳn từng cảnh từ cuối (không
+          // bao giờ bỏ cảnh đầu tiên). voice.js thường đã cắt sẵn nên
+          // khối này chỉ kích hoạt với meta lạ.
+          const MAX_SHORT = 58, MIN_WIN = 1.5;
+          let tot = hooks.reduce((t, h) => t + (h.end - h.start), 0);
+          if (tot > MAX_SHORT) {
+            for (let i = hooks.length - 1; i >= 0 && tot > MAX_SHORT; i--) {
+              const canCut = (hooks[i].end - hooks[i].start) - MIN_WIN;
+              if (canCut > 0) { const cut = Math.min(canCut, tot - MAX_SHORT); hooks[i].end -= cut; tot -= cut; }
+            }
+            while (tot > MAX_SHORT && hooks.length > 1) { const h = hooks.pop(); tot -= (h.end - h.start); }
+            console.log('CẢNH BÁO: tổng hook vượt 58s — đã cắt còn ' + tot.toFixed(2) + 's (' + hooks.length + ' phân cảnh).');
+          }
+          const segs = [];
+          hooks.forEach((h, i) => {
+            const dur = h.end - h.start;
+            const f = 'hook_' + (i + 1) + '.mp4';
+            const r = spawnSync('ffmpeg', ['-y', '-v', 'error', '-ss', String(h.start), '-i', OUT + '.mp4', '-t', String(dur), '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '192k', f], { stdio: 'inherit' });
+            if (r.status === 0 && fs.existsSync(f)) { segs.push({ file: f, dur }); console.log('Đã cắt hook ' + (i + 1) + '/' + hooks.length + ': từ ' + h.start + 's, dài ' + dur.toFixed(2) + 's -> ' + f + '.'); }
+            else console.log('CẢNH BÁO: không cắt được hook ' + (i + 1) + ' (từ ' + h.start + 's, dài ' + dur.toFixed(2) + 's) — bỏ qua đoạn này.');
+          });
+          if (!segs.length) { try { fs.unlinkSync('hook.mp4'); } catch (e) {} console.log('Không cắt được đoạn hook nào — video không có đoạn teaser.'); process.exit(0); }
+          if (segs.length === 1) { fs.renameSync(segs[0].file, 'hook.mp4'); }
+          else {
+            // Nối lại, encode lại cho khớp (cùng cách chuẩn hóa như bước
+            // ghép cuối: fps, scale, yuv420p, audio 48k stereo).
+            const args = [];
+            segs.forEach((s) => args.push('-i', s.file));
+            let filter = '';
+            segs.forEach((s, i) => { filter += '[' + i + ':v]fps=' + process.env.FPS + ',scale=' + process.env.WIDTH + ':' + process.env.HEIGHT + ',format=yuv420p[v' + i + '];[' + i + ':a]aresample=48000,aformat=channel_layouts=stereo[a' + i + '];'; });
+            let concat = '';
+            for (let i = 0; i < segs.length; i++) concat += '[v' + i + '][a' + i + ']';
+            filter += concat + 'concat=n=' + segs.length + ':v=1:a=1[v][a]';
+            execFileSync('ffmpeg', ['-y', '-v', 'error'].concat(args, ['-filter_complex', filter, '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '192k', 'hook.mp4']), { stdio: 'inherit' });
+          }
+          // Tổng độ dài hook thật (đo từ file đã nối) để cộng vào chapters.
+          let totalDur = segs.reduce((t, s) => t + s.dur, 0);
+          try {
+            const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', 'hook.mp4'], { encoding: 'utf-8' }).trim();
+            if (probe && isFinite(+probe)) totalDur = +probe;
+          } catch (e) {}
+          if (Array.isArray(m.chapters)) { m.chapters = m.chapters.map((c) => ({ t: c.t + totalDur, title: c.title })); }
+          // Ghi lại hooks đã cắt thực tế (cửa sổ cuối có thể đã bị cắt
+          // ngắn) để short_meta.json và log sau này không còn số cũ.
+          m.hooks = hooks.map((h, i) => ({ start: h.start, end: h.end, text: h.text, auto: !!h.auto, lineTime: h.lineTime, kind: h.kind || null, trimmed: !!h.trimmed, kept: segs.some((s) => s.file === 'hook_' + (i + 1) + '.mp4') }));
+          m.shortTotalSeconds = totalDur;
+          fs.writeFileSync('upload_meta.json', JSON.stringify(m, null, 2));
+          console.log('Đã cộng ' + totalDur.toFixed(2) + 's (hook, ' + segs.length + ' phân cảnh) vào chapters.');
+          console.log('Đã cắt hook: ' + segs.length + ' phân cảnh, tổng ' + totalDur.toFixed(2) + 's -> hook.mp4.');
+          EOF
 
-      # Short dọc: lấy từ đoạn hook (đoạn hay nhất, thường chỉ vài giây —
-      # rất hợp làm Short dưới 60s). Không có hook thì lấy 15s đầu video
-      # chính. Làm bằng filter ffmpeg: nền là video gốc phóng to + làm mờ,
-      # video gốc thu nhỏ đặt giữa, tiếng giữ nguyên. Bước này chạy TRƯỚC
-      # bước ghép nên "${OUT}.mp4" lúc này vẫn là video chính (chưa có
-      # intro/outro). Lỗi thì thôi (continue-on-error), chỉ mất Short.
+      # Short dọc: lấy từ đoạn hook (một hoặc NHIỀU phân cảnh đã nối sẵn
+      # trong hook.mp4 — tổng luôn ≤ 58s nên Short luôn dưới 60s). Không có
+      # hook thì lấy 15s đầu video chính. Làm bằng filter ffmpeg: nền là
+      # video gốc phóng to + làm mờ, video gốc thu nhỏ đặt giữa, tiếng giữ
+      # nguyên. Bước này chạy TRƯỚC bước ghép nên "${OUT}.mp4" lúc này vẫn
+      # là video chính (chưa có intro/outro). Lỗi thì thôi
+      # (continue-on-error), chỉ mất Short.
       - name: Tạo video Short dọc từ đoạn hook
         if: ${{ inputs.short != 'false' && inputs.max_frames == '0' }}
         continue-on-error: true
@@ -345,7 +403,18 @@ jobs:
             SRC="short_src.mp4"
           fi
           ffmpeg -y -v error -i "$SRC" -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];[0:v]scale=1080:1080:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v]" -map "[v]" -map 0:a -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k short.mp4
-          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('upload_meta.json','utf-8'));const s={title:m.title,description:(m.description||'')+'\n#Shorts',tags:m.tags||[],hook:m.hook||null};fs.writeFileSync('short_meta.json',JSON.stringify(s,null,2));console.log('Đã tạo short_meta.json (cùng tiêu đề/tags, mô tả thêm #Shorts).');"
+          # Phòng thủ cuối: Short phải < 60s. voice.js đã khống chế tổng
+          # hook ≤ 58s nên bước này thường không kích hoạt; nếu vì lý do
+          # gì đó Short vẫn ≥ 60s thì cắt cứng còn 58s.
+          SHORT_DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 short.mp4)"
+          echo "Short dài ${SHORT_DUR}s."
+          if [ "$(awk -v d="$SHORT_DUR" 'BEGIN{print (d>=60)}')" = "1" ]; then
+            echo "CẢNH BÁO: Short dài ${SHORT_DUR}s (>=60s) — cắt lại còn 58s."
+            ffmpeg -y -v error -i short.mp4 -t 58 -c:v libx264 -crf 18 -preset veryfast -c:a aac -b:a 192k short_58.mp4
+            mv short_58.mp4 short.mp4
+            echo "Short sau khi cắt: $(ffprobe -v error -show_entries format=duration -of csv=p=0 short.mp4)s."
+          fi
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('upload_meta.json','utf-8'));const s={title:m.title,description:(m.description||'')+'\n#Shorts',tags:m.tags||[],hook:m.hook||null,hooks:m.hooks||null,shortTotalSeconds:m.shortTotalSeconds||null};fs.writeFileSync('short_meta.json',JSON.stringify(s,null,2));console.log('Đã tạo short_meta.json (cùng tiêu đề/tags, mô tả thêm #Shorts).');"
           echo "Đã tạo short.mp4 (1080x1920, dọc)."
 
       # Intro/outro là phần trang trí: lỗi thì job vẫn đi tiếp (nhờ
