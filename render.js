@@ -21,6 +21,15 @@
 //   (lời dẫn giữ màu vàng, thoại tô màu theo tên người nói) để người xem
 //   phân biệt được ai đang nói chỉ bằng màu sắc.
 //
+// Tiếng động (SFX, v1.1.4): game chỉ phát tiếng trong trình duyệt headless
+//   lúc render nên tiếng mp3 bị mất hẳn nếu không thu lại. Driver bọc thêm
+//   5 hàm âm thanh của game (playSound, startSfxLoop, stopSfxLoop,
+//   startSfxAmbientLoop, stopSfxAmbientLoop), ghi mỗi lần phát thành 1 sự
+//   kiện vào window.__sfxEvents kèm URL tuyệt đối của file mp3, rồi đóng
+//   dấu thời gian ảo (emitted/FPS) lúc drain — sai số trong 1 frame.
+//   Cuối render ghi ra sfx.json (cạnh captions.json) để voice.js tải các
+//   file mp3 đó về và trộn lại vào video đúng mốc thời gian.
+//
 // Biến môi trường:
 //   GAME_URL     (bắt buộc) URL tới play.php, vd https://lop2b.click/mine/play.php
 //   SCRIPT_PATH  (mặc định ./binance_godzilla_v15_voice_pitch.json)
@@ -30,12 +39,14 @@
 //   MAX_FRAMES   (mặc định 0 = chạy tới khi kịch bản kết thúc; đặt 300 để chạy thử ~10s)
 //   OUT_VIDEO    (mặc định ./video_silent.mp4) — video CHƯA có tiếng
 //   OUT_CAPTIONS (mặc định ./captions.json) — mốc thời gian từng câu thoại
+//   OUT_SFX      (mặc định ./sfx.json) — mốc thời gian + URL từng tiếng động (SFX)
 //   IMG_FORMAT   png | jpeg (mặc định png; jpeg nhẹ và nhanh hơn, chất lượng vẫn tốt)
 //   JPEG_QUALITY (mặc định 0.92, chỉ dùng khi IMG_FORMAT=jpeg)
 //   SHOT_TIMEOUT (mặc định 120000) thời gian chờ tối đa cho 1 lần chụp frame, ms
 //   SHOT_RETRIES (mặc định 3) số lần thử chụp lại 1 frame khi bị timeout/rỗng
 //   LOAD_WAIT_MS (mặc định 300000) chờ màn hình chờ/bắt đầu tối đa 5 phút ngoài đời thì báo lỗi
 //   HEARTBEAT_MS (mặc định 30000) cứ bao lâu ghi 1 dòng nhịp tim khi đang chờ/chụp chậm
+//   CINEMATIC (mặc định 0) 0 = tắt cinematic khi render (nhanh hơn ~13 lần đo được), 1 = giữ cinematic
 //   SHOT_RETRIES (mặc định 3) số lần thử chụp lại 1 frame khi bị timeout/rỗng
 //
 // Chạy:  node render.js
@@ -46,6 +57,10 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 
 const GAME_URL = process.env.GAME_URL;
+const CINEMATIC = (process.env.CINEMATIC || '0').trim(); // 0 = tắt cinematic khi render (đo được nhanh hơn ~13 lần), 1 = giữ cinematic
+// Ghép ?cinematic= vào URL game (không đổi play.php trên host — trang live vẫn mở cinematic ON như cũ).
+let GAME_URL_FULL = GAME_URL;
+try { const u = new URL(GAME_URL); u.searchParams.set('cinematic', CINEMATIC); GAME_URL_FULL = u.toString(); } catch (e) { GAME_URL_FULL = GAME_URL + (GAME_URL.includes('?') ? '&' : '?') + 'cinematic=' + CINEMATIC; }
 const SCRIPT_PATH = process.env.SCRIPT_PATH || './binance_godzilla_v15_voice_pitch.json';
 const WIDTH = parseInt(process.env.WIDTH || '2560', 10);
 const HEIGHT = parseInt(process.env.HEIGHT || '1440', 10);
@@ -53,6 +68,7 @@ const FPS = parseInt(process.env.FPS || '30', 10);
 const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || '0', 10);
 const OUT_VIDEO = process.env.OUT_VIDEO || './video_silent.mp4';
 const OUT_CAPTIONS = process.env.OUT_CAPTIONS || './captions.json';
+const OUT_SFX = process.env.OUT_SFX || './sfx.json';
 const IMG_FORMAT = (process.env.IMG_FORMAT || 'png').toLowerCase();
 const JPEG_QUALITY = parseFloat(process.env.JPEG_QUALITY || '0.92');
 const SHOT_TIMEOUT = parseInt(process.env.SHOT_TIMEOUT || '120000', 10);
@@ -71,6 +87,7 @@ const INIT_SCRIPT = `
   window.__vt = 0;            // thời gian ảo, tính bằng mili giây
   window.__rafQueue = [];     // hàng đợi callback requestAnimationFrame
   window.__captions = [];     // caption ghi được trong bước hiện tại
+  window.__sfxEvents = [];    // sự kiện SFX ghi được trong bước hiện tại (v1.1.4)
   window.__rafError = null;
   try {
     Object.defineProperty(window.Performance.prototype, 'now', {
@@ -98,10 +115,13 @@ const INIT_SCRIPT = `
     const loading = !!loadingEl && getComputedStyle(loadingEl).display !== 'none';
     const caps = window.__captions;
     window.__captions = [];
+    const sfx = window.__sfxEvents;
+    window.__sfxEvents = [];
     return {
       running: document.body.classList.contains('kb-running'),
       loading,
       caps,
+      sfx,
       rafError: window.__rafError
     };
   };
@@ -114,7 +134,7 @@ async function main() {
   const script = JSON.parse(fs.readFileSync(SCRIPT_PATH, 'utf-8'));
   console.log(`Kịch bản: ${script.name || SCRIPT_PATH} — ${script.steps.length} bước`);
   console.log(`Khung hình: ${WIDTH}x${HEIGHT} @ ${FPS}fps, định dạng ${IMG_FORMAT}`);
-  console.log(`render.js v1.1.2 (shotfix+loadwatch+heartbeat) — SHOT_TIMEOUT=${SHOT_TIMEOUT}ms x${SHOT_RETRIES}, LOAD_WAIT=${LOAD_WAIT_MS}ms, HEARTBEAT=${HEARTBEAT_MS}ms, MAX_FRAMES=${MAX_FRAMES}`);
+  console.log(`render.js v1.1.4 (shotfix+loadwatch+heartbeat+nocine+sfx) — SHOT_TIMEOUT=${SHOT_TIMEOUT}ms x${SHOT_RETRIES}, LOAD_WAIT=${LOAD_WAIT_MS}ms, HEARTBEAT=${HEARTBEAT_MS}ms, CINEMATIC=${CINEMATIC}, MAX_FRAMES=${MAX_FRAMES}`);
 
   const browser = await chromium.launch({
     args: [
@@ -137,8 +157,8 @@ async function main() {
   page.on('pageerror', (err) => console.log('[lỗi trang]', String(err).slice(0, 500)));
   await page.addInitScript(INIT_SCRIPT);
 
-  console.log('Mở game:', GAME_URL);
-  await page.goto(GAME_URL, { waitUntil: 'load', timeout: 180000 });
+  console.log('Mở game:', GAME_URL_FULL);
+  await page.goto(GAME_URL_FULL, { waitUntil: 'load', timeout: 180000 });
   await page.waitForSelector('#game canvas', { timeout: 180000 });
   // Ẩn nút 👁️ hiện/ẩn UI trong lúc chạy kịch bản để video sạch.
   await page.addStyleTag({ content: '#kbUiReveal{display:none !important}' });
@@ -219,11 +239,81 @@ async function main() {
       };
       ok++;
     }
+    // --- SFX (v1.1.4): bọc 5 hàm âm thanh của game để bắt sự kiện tiếng động.
+    // Mỗi wrapper gọi hàm gốc trước rồi mới ghi event — không đổi giá trị
+    // trả về, không throw (try/catch quanh phần ghi), nên game chạy y như
+    // cũ. Event ghi URL tuyệt đối của file mp3 (el.src đã resolve) để
+    // voice.js tải trực tiếp; t=null, driver đóng dấu sau lúc drain.
+    // Hàm nào game không có thì bỏ qua (không lỗi) — engine cũ vẫn render
+    // bình thường, chỉ là sfx.json sẽ rỗng.
+    window.__sfxEvents = window.__sfxEvents || [];
+    let sfxOk = 0;
+    const sfxPush = (ev) => { try { window.__sfxEvents.push(ev); } catch (e) {} };
+    if (typeof window.playSound === 'function') {
+      const origPS = window.playSound;
+      window.playSound = function (cat, opts) {
+        const el = origPS(cat, opts);
+        try {
+          // playSound trả null khi fallback beep (không có mp3) -> bỏ qua.
+          if (el && el.src) sfxPush({ t: null, kind: 'sfx', cat: String(cat), file: String(el.src), rate: (typeof el.playbackRate === 'number' ? el.playbackRate : 1), vol: (typeof el.volume === 'number' ? el.volume : 1) });
+        } catch (e) {}
+        return el;
+      };
+      sfxOk++;
+    }
+    if (typeof window.startSfxLoop === 'function') {
+      const origSL = window.startSfxLoop;
+      window.startSfxLoop = function (cat, opts) {
+        const el = origSL(cat, opts);
+        try {
+          const loop = window.SFX_LOOP;
+          if (loop && loop.src) sfxPush({ t: null, kind: 'loop-start', cat: String(window.SFX_LOOP_CAT || cat), file: String(loop.src), vol: (typeof loop.volume === 'number' ? loop.volume : 0.4) });
+        } catch (e) {}
+        return el;
+      };
+      sfxOk++;
+    }
+    if (typeof window.stopSfxLoop === 'function') {
+      const origStop = window.stopSfxLoop;
+      window.stopSfxLoop = function () {
+        const had = !!window.SFX_LOOP;
+        const r = origStop();
+        try { if (had) sfxPush({ t: null, kind: 'loop-stop' }); } catch (e) {}
+        return r;
+      };
+      sfxOk++;
+    }
+    if (typeof window.startSfxAmbientLoop === 'function') {
+      const origAL = window.startSfxAmbientLoop;
+      window.startSfxAmbientLoop = function () {
+        const r = origAL();
+        try {
+          const a = window.SFX_AMBIENT;
+          if (a && a.src) sfxPush({ t: null, kind: 'ambient-start', cat: 'ambient', file: String(a.src), vol: (typeof a.volume === 'number' ? a.volume : 0.25) });
+        } catch (e) {}
+        return r;
+      };
+      sfxOk++;
+    }
+    if (typeof window.stopSfxAmbientLoop === 'function') {
+      const origAStop = window.stopSfxAmbientLoop;
+      window.stopSfxAmbientLoop = function () {
+        const had = !!window.SFX_AMBIENT;
+        const r = origAStop();
+        try { if (had) sfxPush({ t: null, kind: 'ambient-stop' }); } catch (e) {}
+        return r;
+      };
+      sfxOk++;
+    }
+    window.__sfxWrapped = sfxOk;
     return ok;
   });
   if (wrapped < 2) {
     throw new Error(`Không bọc được hàm hiện chữ của game (bọc được ${wrapped}/2). Game có thể đã đổi tên hàm kbSay/kbSayDialogue.`);
   }
+  const sfxWrapped = await page.evaluate(() => window.__sfxWrapped || 0);
+  if (sfxWrapped >= 3) console.log(`Đã bọc ${sfxWrapped}/5 hàm âm thanh (playSound/loop/ambient) — SFX sẽ ghi ra sfx.json.`);
+  else console.log(`(cảnh báo) chỉ bọc được ${sfxWrapped}/5 hàm âm thanh — game có thể là engine cũ, sfx.json có thể rỗng.`);
 
   // Chạy kịch bản (không await: kịch bản chạy nền, driver điều khiển từng frame).
   await page.evaluate((sc) => { void window.kbRun(sc); }, script);
@@ -291,6 +381,7 @@ async function main() {
   let startedRun = false;
   let loopErr = null;
   const captionsOut = [];
+  const sfxOut = [];       // sự kiện SFX đã đóng dấu thời gian ảo (v1.1.4)
   const wallStart = Date.now();
   let lastBeat = wallStart; // mốc log nhịp tim (theo thời gian ngoài đời)
   let lastProg = wallStart; // mốc log tiến độ render
@@ -303,6 +394,10 @@ async function main() {
       if (r.running) startedRun = true;
       // Caption của bước này phải giữ lại kể cả khi frame đang ở màn hình chờ.
       for (const c of r.caps) captionsOut.push({ t: emitted / FPS, text: c.text, head: c.head });
+      // SFX cũng vậy: đóng dấu thời gian ảo lúc drain (sai số trong 1 frame
+      // — 33ms ở 30fps). Event từ setTimeout (vd playSoundSeq) rơi vào
+      // giữa 2 bước __step cũng được gom ở lần drain kế tiếp.
+      for (const ev of (r.sfx || [])) { ev.t = emitted / FPS; sfxOut.push(ev); }
       if (!startedRun) {
         // Chưa thấy class kb-running: kịch bản chưa bắt đầu thật (vd chưa qua
         // kiểm tra, hoặc isPlaying chưa bật). Đợi tối đa ~10s thời gian ảo,
@@ -348,15 +443,26 @@ async function main() {
   }
   try { await ffDone; } catch (e) { if (!loopErr) throw e; console.log('ffmpeg cũng lỗi sau khi render đã lỗi (có thể do chưa có frame nào): ' + e.message); }
   if (loopErr) throw loopErr;
+  // Drain lần cuối: event SFX có thể rơi vào sau bước __step cuối cùng
+  // (vd loop-stop ở kbEnd) — gom nốt trước khi ghi file.
+  try {
+    const tail = await page.evaluate(() => { const evs = window.__sfxEvents || []; window.__sfxEvents = []; return evs; });
+    for (const ev of tail) { ev.t = emitted / FPS; sfxOut.push(ev); }
+  } catch (e) { console.log('Không drain được SFX cuối: ' + String((e && e.message) || e).slice(0, 120)); }
   fs.writeFileSync(OUT_CAPTIONS, JSON.stringify({
     fps: FPS, width: WIDTH, height: HEIGHT,
     frames: emitted, skippedLoadingFrames: skipped,
     captions: captionsOut
   }, null, 2), 'utf-8');
+  fs.writeFileSync(OUT_SFX, JSON.stringify({
+    script: script.name || SCRIPT_PATH, fps: FPS,
+    frames: emitted, events: sfxOut
+  }, null, 2), 'utf-8');
   await browser.close();
-  console.log(`XONG render: ${emitted} frame = ${(emitted / FPS).toFixed(1)}s video, bỏ ${skipped} frame màn hình chờ, bắt ${captionsOut.length} caption.`);
+  console.log(`XONG render: ${emitted} frame = ${(emitted / FPS).toFixed(1)}s video, bỏ ${skipped} frame màn hình chờ, bắt ${captionsOut.length} caption, ${sfxOut.length} sự kiện SFX.`);
   console.log('Video chưa tiếng:', OUT_VIDEO);
   console.log('Mốc caption:', OUT_CAPTIONS);
+  console.log('Mốc SFX:', OUT_SFX);
 }
 
 main().catch((e) => { console.error('RENDER THẤT BẠI:', e && e.stack || e); process.exit(1); });
