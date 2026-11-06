@@ -35,6 +35,7 @@
 //   SHOT_TIMEOUT (mặc định 120000) thời gian chờ tối đa cho 1 lần chụp frame, ms
 //   SHOT_RETRIES (mặc định 3) số lần thử chụp lại 1 frame khi bị timeout/rỗng
 //   LOAD_WAIT_MS (mặc định 300000) chờ màn hình chờ/bắt đầu tối đa 5 phút ngoài đời thì báo lỗi
+//   HEARTBEAT_MS (mặc định 30000) cứ bao lâu ghi 1 dòng nhịp tim khi đang chờ/chụp chậm
 //   SHOT_RETRIES (mặc định 3) số lần thử chụp lại 1 frame khi bị timeout/rỗng
 //
 // Chạy:  node render.js
@@ -57,6 +58,7 @@ const JPEG_QUALITY = parseFloat(process.env.JPEG_QUALITY || '0.92');
 const SHOT_TIMEOUT = parseInt(process.env.SHOT_TIMEOUT || '120000', 10);
 const SHOT_RETRIES = parseInt(process.env.SHOT_RETRIES || '3', 10);
 const LOAD_WAIT_MS = parseInt(process.env.LOAD_WAIT_MS || '300000', 10); // chờ màn hình chờ/bắt đầu tối đa 5 phút ngoài đời thì báo lỗi (mỗi frame ảo có thể tốn vài giây ngoài đời trên máy không có GPU nên không thể chỉ đếm frame ảo)
+const HEARTBEAT_MS = parseInt(process.env.HEARTBEAT_MS || '30000', 10); // nhịp tim theo thời gian ngoài đời (đếm frame không đủ dày khi mỗi frame ảo tốn vài giây)
 const MAX_SKIP_FRAMES = 1800; // quá 60s (ở 30fps) mà màn hình chờ vẫn chưa tắt thì báo lỗi
 
 if (!GAME_URL) { console.error('Thiếu GAME_URL'); process.exit(2); }
@@ -112,7 +114,7 @@ async function main() {
   const script = JSON.parse(fs.readFileSync(SCRIPT_PATH, 'utf-8'));
   console.log(`Kịch bản: ${script.name || SCRIPT_PATH} — ${script.steps.length} bước`);
   console.log(`Khung hình: ${WIDTH}x${HEIGHT} @ ${FPS}fps, định dạng ${IMG_FORMAT}`);
-  console.log(`render.js v1.1.1 (shotfix+loadwatch) — SHOT_TIMEOUT=${SHOT_TIMEOUT}ms x${SHOT_RETRIES}, LOAD_WAIT=${LOAD_WAIT_MS}ms, MAX_FRAMES=${MAX_FRAMES}`);
+  console.log(`render.js v1.1.2 (shotfix+loadwatch+heartbeat) — SHOT_TIMEOUT=${SHOT_TIMEOUT}ms x${SHOT_RETRIES}, LOAD_WAIT=${LOAD_WAIT_MS}ms, HEARTBEAT=${HEARTBEAT_MS}ms, MAX_FRAMES=${MAX_FRAMES}`);
 
   const browser = await chromium.launch({
     args: [
@@ -290,6 +292,8 @@ async function main() {
   let loopErr = null;
   const captionsOut = [];
   const wallStart = Date.now();
+  let lastBeat = wallStart; // mốc log nhịp tim (theo thời gian ngoài đời)
+  let lastProg = wallStart; // mốc log tiến độ render
 
   try {
     for (;;) {
@@ -304,7 +308,7 @@ async function main() {
         // kiểm tra, hoặc isPlaying chưa bật). Đợi tối đa ~10s thời gian ảo,
         // và tối đa LOAD_WAIT_MS ngoài đời.
         waited++;
-        if (waited % 100 === 0) console.log(`Đang chờ kịch bản bắt đầu... ${waited} frame ảo, ${((Date.now() - wallStart) / 1000).toFixed(0)}s ngoài đời`);
+        if (Date.now() - lastBeat > HEARTBEAT_MS) { lastBeat = Date.now(); console.log(`Đang chờ kịch bản bắt đầu... ${waited} frame ảo, ${((Date.now() - wallStart) / 1000).toFixed(0)}s ngoài đời`); }
         if (waited > FPS * 10 || Date.now() - wallStart > LOAD_WAIT_MS) {
           const info = await loadDiag('chưa bắt đầu');
           throw new Error('Kịch bản không bắt đầu chạy sau ' + waited + ' frame ảo / ' + ((Date.now() - wallStart) / 1000).toFixed(0) + 's ngoài đời. ' + info);
@@ -313,7 +317,7 @@ async function main() {
       }
       if (r.loading) {
         skipped++;
-        if (skipped % 100 === 0) console.log(`Đang chờ màn hình chờ (kbLoading) tắt... đã bỏ ${skipped} frame, ${((Date.now() - wallStart) / 1000).toFixed(0)}s ngoài đời`);
+        if (Date.now() - lastBeat > HEARTBEAT_MS) { lastBeat = Date.now(); console.log(`Đang chờ màn hình chờ (kbLoading) tắt... đã bỏ ${skipped} frame, ${((Date.now() - wallStart) / 1000).toFixed(0)}s ngoài đời`); }
         if (skipped > MAX_SKIP_FRAMES || Date.now() - wallStart > LOAD_WAIT_MS) {
           const info = await loadDiag('màn hình chờ');
           throw new Error('Màn hình chờ (kbLoading) không tắt sau ' + skipped + ' frame / ' + ((Date.now() - wallStart) / 1000).toFixed(0) + 's ngoài đời — kịch bản có thể kẹt ở bước wake/scene hoặc world chưa load xong. ' + info);
@@ -321,12 +325,16 @@ async function main() {
         continue; // bỏ frame màn hình chờ, video bắt đầu từ lúc cảnh hiện ra
       }
       // Chụp TOÀN TRANG (game + khung chữ + popup báo giấy) thay vì chỉ canvas.
+      const shotStart = Date.now();
       const shot = await takeShot(IMG_FORMAT === 'jpeg'
         ? { type: 'jpeg', quality: Math.round(JPEG_QUALITY * 100) }
         : { type: 'png' });
       await writeFrame(shot);
+      const shotMs = Date.now() - shotStart;
+      if (shotMs > 5000) console.log(`Chụp frame ${emitted + 1} mất ${(shotMs / 1000).toFixed(1)}s`);
       emitted++;
-      if (emitted % 60 === 0) {
+      if (emitted % 60 === 0 || Date.now() - lastProg > 60000) {
+        lastProg = Date.now();
         const wall = (Date.now() - wallStart) / 1000;
         console.log(`Đã render ${emitted} frame (${(emitted / FPS).toFixed(1)}s video) — tốc độ ${(emitted / wall).toFixed(2)} frame/giây ngoài đời, caption bắt được: ${captionsOut.length}`);
       }
