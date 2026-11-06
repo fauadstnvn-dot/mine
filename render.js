@@ -34,6 +34,8 @@
 //   JPEG_QUALITY (mặc định 0.92, chỉ dùng khi IMG_FORMAT=jpeg)
 //   SHOT_TIMEOUT (mặc định 120000) thời gian chờ tối đa cho 1 lần chụp frame, ms
 //   SHOT_RETRIES (mặc định 3) số lần thử chụp lại 1 frame khi bị timeout/rỗng
+//   LOAD_WAIT_MS (mặc định 300000) chờ màn hình chờ/bắt đầu tối đa 5 phút ngoài đời thì báo lỗi
+//   SHOT_RETRIES (mặc định 3) số lần thử chụp lại 1 frame khi bị timeout/rỗng
 //
 // Chạy:  node render.js
 // Yêu cầu: npm install playwright  +  npx playwright install chromium
@@ -54,6 +56,7 @@ const IMG_FORMAT = (process.env.IMG_FORMAT || 'png').toLowerCase();
 const JPEG_QUALITY = parseFloat(process.env.JPEG_QUALITY || '0.92');
 const SHOT_TIMEOUT = parseInt(process.env.SHOT_TIMEOUT || '120000', 10);
 const SHOT_RETRIES = parseInt(process.env.SHOT_RETRIES || '3', 10);
+const LOAD_WAIT_MS = parseInt(process.env.LOAD_WAIT_MS || '300000', 10); // chờ màn hình chờ/bắt đầu tối đa 5 phút ngoài đời thì báo lỗi (mỗi frame ảo có thể tốn vài giây ngoài đời trên máy không có GPU nên không thể chỉ đếm frame ảo)
 const MAX_SKIP_FRAMES = 1800; // quá 60s (ở 30fps) mà màn hình chờ vẫn chưa tắt thì báo lỗi
 
 if (!GAME_URL) { console.error('Thiếu GAME_URL'); process.exit(2); }
@@ -109,6 +112,7 @@ async function main() {
   const script = JSON.parse(fs.readFileSync(SCRIPT_PATH, 'utf-8'));
   console.log(`Kịch bản: ${script.name || SCRIPT_PATH} — ${script.steps.length} bước`);
   console.log(`Khung hình: ${WIDTH}x${HEIGHT} @ ${FPS}fps, định dạng ${IMG_FORMAT}`);
+  console.log(`render.js v1.1.1 (shotfix+loadwatch) — SHOT_TIMEOUT=${SHOT_TIMEOUT}ms x${SHOT_RETRIES}, LOAD_WAIT=${LOAD_WAIT_MS}ms, MAX_FRAMES=${MAX_FRAMES}`);
 
   const browser = await chromium.launch({
     args: [
@@ -263,9 +267,27 @@ async function main() {
     throw new Error(`Không chụp được màn hình sau ${SHOT_RETRIES} lần thử: ${String((lastErr && lastErr.message) || lastErr).slice(0, 300)}`);
   }
 
+  // Chẩn đoán khi kẹt ở màn hình chờ / chưa bắt đầu: chụp ảnh + lấy thông báo game.
+  async function loadDiag(tag) {
+    let info = '';
+    try {
+      info = await page.evaluate(() => {
+        const m = document.getElementById('kbMsg');
+        const n = document.getElementById('kbStepN');
+        const d = document.getElementById('kbStepDo');
+        return JSON.stringify({ msg: m ? m.textContent.slice(0, 500) : '', step: n ? n.textContent : '', do: d ? d.textContent : '' });
+      });
+    } catch (e) { info = '(không đọc được trạng thái trang: ' + String((e && e.message) || e).slice(0, 120) + ')'; }
+    try { await takeShot({ path: 'render-debug.png' }); } catch (e) { console.log('Không chụp được ảnh debug: ' + String((e && e.message) || e).slice(0, 120)); }
+    console.log(`Chẩn đoán kẹt ${tag}: ${info} (ảnh render-debug.png)`);
+    return info;
+  }
+
   let emitted = 0;      // số frame đã đưa vào video (quyết định mốc thời gian)
   let skipped = 0;      // số frame bỏ qua vì màn hình chờ chưa tắt
+  let waited = 0;       // số frame ảo đã chờ kịch bản bắt đầu (đếm riêng: emitted+skipped không tăng trong lúc chờ bắt đầu nên không dùng được làm điều kiện dừng)
   let startedRun = false;
+  let loopErr = null;
   const captionsOut = [];
   const wallStart = Date.now();
 
@@ -275,43 +297,49 @@ async function main() {
       if (r.rafError) throw new Error('Lỗi trong vòng lặp game: ' + r.rafError);
 
       if (r.running) startedRun = true;
+      // Caption của bước này phải giữ lại kể cả khi frame đang ở màn hình chờ.
+      for (const c of r.caps) captionsOut.push({ t: emitted / FPS, text: c.text, head: c.head });
       if (!startedRun) {
         // Chưa thấy class kb-running: kịch bản chưa bắt đầu thật (vd chưa qua
-        // kiểm tra, hoặc isPlaying chưa bật). Đợi tối đa ~10s thời gian ảo.
-        if (emitted + skipped > FPS * 10) {
-          const kbMsg = await page.evaluate(() => {
-            const el = document.getElementById('kbMsg');
-            return el ? el.textContent.slice(0, 1000) : '';
-          });
-          await takeShot({ path: 'render-debug.png' });
-          throw new Error('Kịch bản không bắt đầu chạy. Thông báo của game: ' + (kbMsg || '(trống)') + '. Đã lưu ảnh render-debug.png');
+        // kiểm tra, hoặc isPlaying chưa bật). Đợi tối đa ~10s thời gian ảo,
+        // và tối đa LOAD_WAIT_MS ngoài đời.
+        waited++;
+        if (waited % 100 === 0) console.log(`Đang chờ kịch bản bắt đầu... ${waited} frame ảo, ${((Date.now() - wallStart) / 1000).toFixed(0)}s ngoài đời`);
+        if (waited > FPS * 10 || Date.now() - wallStart > LOAD_WAIT_MS) {
+          const info = await loadDiag('chưa bắt đầu');
+          throw new Error('Kịch bản không bắt đầu chạy sau ' + waited + ' frame ảo / ' + ((Date.now() - wallStart) / 1000).toFixed(0) + 's ngoài đời. ' + info);
         }
         continue;
       }
       if (r.loading) {
         skipped++;
-        if (skipped > MAX_SKIP_FRAMES) throw new Error('Màn hình chờ (kbLoading) không tắt sau ' + MAX_SKIP_FRAMES + ' frame — kịch bản có thể kẹt ở bước wake/scene.');
+        if (skipped % 100 === 0) console.log(`Đang chờ màn hình chờ (kbLoading) tắt... đã bỏ ${skipped} frame, ${((Date.now() - wallStart) / 1000).toFixed(0)}s ngoài đời`);
+        if (skipped > MAX_SKIP_FRAMES || Date.now() - wallStart > LOAD_WAIT_MS) {
+          const info = await loadDiag('màn hình chờ');
+          throw new Error('Màn hình chờ (kbLoading) không tắt sau ' + skipped + ' frame / ' + ((Date.now() - wallStart) / 1000).toFixed(0) + 's ngoài đời — kịch bản có thể kẹt ở bước wake/scene hoặc world chưa load xong. ' + info);
+        }
         continue; // bỏ frame màn hình chờ, video bắt đầu từ lúc cảnh hiện ra
       }
-      // Caption ghi trong bước này thuộc về frame sắp ghi (mốc = số frame đã có).
-      for (const c of r.caps) captionsOut.push({ t: emitted / FPS, text: c.text, head: c.head });
       // Chụp TOÀN TRANG (game + khung chữ + popup báo giấy) thay vì chỉ canvas.
       const shot = await takeShot(IMG_FORMAT === 'jpeg'
         ? { type: 'jpeg', quality: Math.round(JPEG_QUALITY * 100) }
         : { type: 'png' });
       await writeFrame(shot);
       emitted++;
-      if (emitted % 300 === 0) {
+      if (emitted % 60 === 0) {
         const wall = (Date.now() - wallStart) / 1000;
         console.log(`Đã render ${emitted} frame (${(emitted / FPS).toFixed(1)}s video) — tốc độ ${(emitted / wall).toFixed(2)} frame/giây ngoài đời, caption bắt được: ${captionsOut.length}`);
       }
       if (MAX_FRAMES > 0 && emitted >= MAX_FRAMES) { console.log('Dừng ở MAX_FRAMES=' + MAX_FRAMES + ' (chế độ chạy thử)'); break; }
       if (!r.running && emitted > 0) { console.log('Kịch bản đã kết thúc (class kb-running đã tắt).'); break; }
     }
+  } catch (e) {
+    loopErr = e;
   } finally {
     ff.stdin.end();
   }
-  await ffDone;
+  try { await ffDone; } catch (e) { if (!loopErr) throw e; console.log('ffmpeg cũng lỗi sau khi render đã lỗi (có thể do chưa có frame nào): ' + e.message); }
+  if (loopErr) throw loopErr;
   fs.writeFileSync(OUT_CAPTIONS, JSON.stringify({
     fps: FPS, width: WIDTH, height: HEIGHT,
     frames: emitted, skippedLoadingFrames: skipped,
