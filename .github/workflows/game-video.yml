@@ -6,9 +6,11 @@
 #   2. Bốc ngẫu nhiên 1 bản nhạc nền .mp3 trong thư mục nhac_nen trên host
 #      qua FTP (cùng cấp với play.php; nhạc dùng lại nhiều lần, KHÔNG bị
 #      chuyển đi như kịch bản).
-#   3. Render game offline từng frame theo thời gian ảo -> video chưa có tiếng.
+#   3. Render game offline từng frame theo thời gian ảo -> video chưa có tiếng
+#      (+ bắt mốc caption ra captions.json và mốc tiếng động SFX ra sfx.json).
 #   4. Tạo giọng từng câu bằng ElevenLabs (xoay key theo quota), đặt đúng mốc
-#      thời gian, trộn nhạc nền ở mức 20% (lặp tới hết video), mux vào video.
+#      thời gian, trộn tiếng động SFX đúng mốc + nhạc nền ở mức 15% (lặp tới
+#      hết video; nhạc tự nhỏ lại khi có giọng nói hoặc tiếng động), mux vào video.
 #   5. Cắt đoạn hook (vài giây đoạn hay): câu thoại đánh dấu "hook": true,
 #      hoặc máy tự đoán (câu có "!" sau 25% video), cắt từ video chính.
 #   6. Tạo video Short dọc 1080x1920 từ đoạn hook (không có hook thì lấy
@@ -106,6 +108,10 @@ on:
         description: "jpeg (nhanh, đủ nét cho game hoạt hình) hoặc png (nét nhất, chậm hơn)"
         required: false
         default: "jpeg"
+      cinematic:
+        description: "0 = tắt cinematic khi render (nhanh hơn nhiều); 1 = giữ cinematic"
+        required: false
+        default: "0"
       script:
         description: "Tên 1 kịch bản cụ thể (để trống = bốc ngẫu nhiên)"
         required: false
@@ -115,9 +121,9 @@ on:
         required: false
         default: ""
       music_volume:
-        description: "Âm lượng nhạc nền (0.2 = 20%)"
+        description: "Âm lượng nhạc nền (0.15 = 15%; nhạc tự nhỏ lại khi có giọng nói hoặc tiếng động)"
         required: false
-        default: "0.2"
+        default: "0.15"
       yt_upload:
         description: "Đăng video lên YouTube sau khi render xong (false = chỉ chạy thử, kịch bản KHÔNG bị chuyển)"
         required: false
@@ -277,8 +283,10 @@ jobs:
           FPS: ${{ inputs.fps }}
           MAX_FRAMES: ${{ inputs.max_frames }}
           IMG_FORMAT: ${{ inputs.img_format }}
+          CINEMATIC: ${{ inputs.cinematic }}
           OUT_VIDEO: video_silent.mp4
           OUT_CAPTIONS: captions.json
+          OUT_SFX: sfx.json
         run: node render.js
 
       - name: Tải file txt API key từ host
@@ -300,6 +308,7 @@ jobs:
             --script picked_script.json \
             --script-name "$SCRIPT_NAME" \
             --captions captions.json \
+            --sfx sfx.json \
             --keys keys.txt \
             --video-in video_silent.mp4 \
             --video-out "${OUT}.mp4" \
@@ -633,6 +642,7 @@ jobs:
           name: ${{ env.OUT }}-debug
           path: |
             captions.json
+            sfx.json
             picked_meta.json
             picked_music_meta.json
             upload_meta.json
@@ -705,6 +715,6 @@ jobs:
           # job kết thúc).
           rm -rf voice_work intro_silent.mp4 outro_silent.mp4 intro.mp4 hook.mp4 outro.mp4 \
             bg.jpg thumb.jpg short.mp4 short_src.mp4 short_meta.json short.youtube.json \
-            "${OUT}.mp4" captions.json picked_meta.json picked_music_meta.json \
+            "${OUT}.mp4" captions.json sfx.json picked_meta.json picked_music_meta.json \
             upload_meta.json "${OUT}.youtube.json" picked_script.json picked_music.mp3
           echo "Đã dọn dẹp xong."
