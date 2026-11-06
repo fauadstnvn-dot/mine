@@ -29,7 +29,10 @@
 //   --voice-id (mặc định ErXwobaYiN019PkySvjV = Antoni)
 //   --model    (mặc định eleven_multilingual_v2)
 //   --eleven-base (mặc định https://api.elevenlabs.io; dùng để test với mock)
-//   --music <file> --music-volume 0.2 (nhạc nền, tùy chọn; lặp vô hạn rồi cắt đúng độ dài video)
+//   --music <file> --music-volume 0.15 (nhạc nền, tùy chọn; lặp vô hạn rồi cắt đúng độ dài video)
+//   --sfx sfx.json (tùy chọn; mốc + URL từng tiếng động do render.js ghi —
+//     tải mp3 về, ráp thành track SFX đúng mốc, nhạc nền tự nhỏ lại khi có
+//     giọng nói hoặc tiếng động; không có file thì chạy như bản cũ)
 //   --work-dir (mặc định ./voice_work)
 //   --meta-out (mặc định ./upload_meta.json) — file tiêu đề + mô tả + tags +
 //     chapter lấy từ kịch bản (video_title/video_description, nếu không có
@@ -59,7 +62,8 @@ const VOICE_ID = arg('voice-id', 'ErXwobaYiN019PkySvjV'); // Antoni
 const MODEL_ID = arg('model', 'eleven_multilingual_v2');
 const ELEVEN_BASE = (arg('eleven-base', 'https://api.elevenlabs.io') || '').replace(/\/$/, '');
 const MUSIC = arg('music', null);
-const MUSIC_VOL = arg('music-volume', '0.2');
+const MUSIC_VOL = arg('music-volume', '0.15');
+const SFX_PATH = arg('sfx', null); // sfx.json do render.js v1.1.4 ghi (tùy chọn)
 const META_OUT = arg('meta-out', './upload_meta.json');
 const SCRIPT_NAME = arg('script-name', '');
 
@@ -338,6 +342,118 @@ function matchCaptions(lines, captions) {
   return { unmatchedLines, extraCaptions, firstUnmatched: unmatchedLines.length ? lines.indexOf(unmatchedLines[0]) : -1, lastMatched };
 }
 
+// ---- SFX (v1.1.4) ----
+// render.js bọc 5 hàm âm thanh của game và ghi sfx.json: mỗi sự kiện có
+// mốc thời gian ảo t (giây), loại (sfx one-shot / loop-start / loop-stop /
+// ambient-start / ambient-stop) và URL tuyệt đối của file mp3 trên host.
+// buildSfxSegments() đổi danh sách sự kiện thành các đoạn cần ráp:
+//   - one-shot: phát 1 lần tại t, giữ nguyên rate/vol của game.
+//   - loop/ambient: từ loop-start tới loop-stop (không có stop thì cắt ở
+//     cuối video) — cùng 1 file lặp vô hạn rồi cắt đúng độ dài đoạn.
+// Đoạn loop đang mở mà gặp loop-start mới thì đóng đoạn cũ ngay tại đó
+// (phòng trường hợp game gọi start 2 lần cùng thể loại) để không chồng
+// 2 bản lặp của cùng 1 file lên nhau.
+function buildSfxSegments(events, outDur) {
+  const segs = [];
+  // Loop và ambient là 2 Audio riêng (SFX_LOOP / SFX_AMBIENT) nên theo
+  // dõi riêng: loop-stop chỉ đóng loop, ambient-stop chỉ đóng ambient.
+  let openLoop = null, openAmbient = null;
+  const closeOpen = (slot, t) => {
+    const o = slot === 'loop' ? openLoop : openAmbient;
+    if (!o) return;
+    const dur = t - o.start;
+    if (dur > 0.05 && o.file) segs.push({ file: o.file, start: o.start, dur, vol: o.vol, loop: true });
+    if (slot === 'loop') openLoop = null; else openAmbient = null;
+  };
+  for (const ev of events || []) {
+    if (!ev || typeof ev.t !== 'number' || !isFinite(ev.t)) continue;
+    if (ev.kind === 'sfx' && ev.file) {
+      segs.push({ file: ev.file, start: ev.t, dur: 0, vol: (typeof ev.vol === 'number' ? ev.vol : 1), rate: (typeof ev.rate === 'number' ? ev.rate : 1), loop: false });
+    } else if (ev.kind === 'loop-start' && ev.file) {
+      closeOpen('loop', ev.t);
+      openLoop = { cat: ev.cat, file: ev.file, vol: (typeof ev.vol === 'number' ? ev.vol : 0.4), start: ev.t };
+    } else if (ev.kind === 'ambient-start' && ev.file) {
+      closeOpen('ambient', ev.t);
+      openAmbient = { cat: ev.cat, file: ev.file, vol: (typeof ev.vol === 'number' ? ev.vol : 0.25), start: ev.t };
+    } else if (ev.kind === 'loop-stop') {
+      closeOpen('loop', ev.t);
+    } else if (ev.kind === 'ambient-stop') {
+      closeOpen('ambient', ev.t);
+    }
+  }
+  closeOpen('loop', outDur);
+  closeOpen('ambient', outDur);
+  segs.sort((a, b) => a.start - b.start);
+  return {
+    segments: segs,
+    oneShots: segs.filter((s) => !s.loop).length,
+    loops: segs.filter((s) => s.loop).length
+  };
+}
+
+// Tải mỗi URL SFX duy nhất 1 lần (curl -fsSL, kiểm chứng bằng ffprobe:
+// duration phải > 0) rồi ráp thành 1 track WAV bằng 1 lần ffmpeg:
+// one-shot dùng atempo (clamp [0.5, 2.0] vì atempo chỉ nhận khoảng đó;
+// rate của game thường 0.9–1.15 nên hiếm khi chạm clamp) + volume +
+// adelay đúng mốc; loop dùng -stream_loop -1 + atrim đúng độ dài đoạn.
+// URL nào tải lỗi thì bỏ đoạn đó và cảnh báo, không dừng cả job.
+// Trả { track: <đường dẫn wav> | null, stats } — track null nghĩa là
+// không có đoạn SFX nào dùng được, bước mux sẽ chạy như bản cũ.
+async function buildSfxTrack(events, outDur) {
+  const { segments, oneShots, loops } = buildSfxSegments(events, outDur);
+  const baseStats = { events: events.length, oneShots, loops, used: 0, skipped: segments.length, totalSeconds: 0 };
+  if (!segments.length) return { track: null, stats: baseStats };
+  const cache = new Map(); // url -> { local, dur } | null (tải lỗi)
+  let n = 0;
+  const usable = [];
+  for (const s of segments) {
+    if (!cache.has(s.file)) {
+      n++;
+      const local = path.join(WORK_DIR, `sfx_${String(n).padStart(3, '0')}.mp3`);
+      try {
+        await run('curl', ['-fsSL', s.file, '-o', local]);
+        const d = await ffprobeDuration(local);
+        if (!(d > 0)) throw new Error('duration = ' + d);
+        cache.set(s.file, { local, dur: d });
+      } catch (e) {
+        console.log(`  (cảnh báo) không tải được SFX ${s.file}: ${e.message} — bỏ đoạn này.`);
+        cache.set(s.file, null);
+      }
+    }
+    const hit = cache.get(s.file);
+    if (hit) usable.push({ ...s, local: hit.local, fileDur: hit.dur });
+  }
+  if (!usable.length) return { track: null, stats: baseStats };
+  const filterParts = [];
+  const inputs = [];
+  let inIdx = 0;
+  const tags = [];
+  let totalSeconds = 0;
+  for (const s of usable) {
+    if (s.loop) inputs.push('-stream_loop', '-1', '-i', s.local);
+    else inputs.push('-i', s.local);
+    const idx = inIdx++;
+    const tag = 's' + idx;
+    const vol = Math.max(0, Math.min(1, s.vol));
+    const delayMs = Math.round(s.start * 1000);
+    if (s.loop) {
+      filterParts.push(`[${idx}:a]volume=${vol},atrim=0:${s.dur.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delayMs}:all=1[${tag}]`);
+      totalSeconds += s.dur;
+    } else {
+      let rate = (typeof s.rate === 'number' && isFinite(s.rate)) ? s.rate : 1;
+      const clamped = Math.max(0.5, Math.min(2.0, rate));
+      if (clamped !== rate) console.log(`  (cảnh báo) SFX rate ${rate} vượt atempo [0.5, 2.0] — clamp về ${clamped}.`);
+      filterParts.push(`[${idx}:a]atempo=${clamped.toFixed(4)},volume=${vol},adelay=${delayMs}:all=1[${tag}]`);
+      totalSeconds += s.fileDur / clamped;
+    }
+    tags.push(`[${tag}]`);
+  }
+  filterParts.push(`${tags.join('')}amix=inputs=${tags.length}:normalize=0:duration=longest,apad[sfxout]`);
+  const sfxTrack = path.join(WORK_DIR, 'sfx_track.wav');
+  await run('ffmpeg', ['-y', '-v', 'error', ...inputs, '-filter_complex', filterParts.join(';'), '-map', '[sfxout]', '-t', String(outDur), sfxTrack]);
+  return { track: sfxTrack, stats: { events: events.length, segments: segments.length, oneShots, loops, used: usable.length, skipped: segments.length - usable.length, totalSeconds } };
+}
+
 // ---- 3. Key + quota ----
 async function checkQuota(key) {
   const headers = { 'xi-api-key': key };
@@ -403,11 +519,25 @@ async function tts(key, text) {
 }
 
 async function main() {
+  console.log('voice.js v1.1.4 (SFX mix + music ducking)');
   const script = JSON.parse(fs.readFileSync(SCRIPT_PATH, 'utf-8'));
   const capData = JSON.parse(fs.readFileSync(CAPTIONS_PATH, 'utf-8'));
   const lines = extractLines(script);
   console.log(`Kịch bản: ${lines.length} câu thoại, tổng ${lines.reduce((a, l) => a + charsOf(l.text), 0)} ký tự.`);
   console.log(`Caption bắt được: ${capData.captions.length} mốc.`);
+
+  // SFX (v1.1.4): file không tồn tại / rỗng / đọc lỗi -> sfxEvents = []
+  // và mọi bước sau chạy y như bản cũ (không track SFX, mux cũ).
+  let sfxEvents = [];
+  if (SFX_PATH) {
+    if (fs.existsSync(SFX_PATH)) {
+      try {
+        const sd = JSON.parse(fs.readFileSync(SFX_PATH, 'utf-8'));
+        if (Array.isArray(sd.events)) sfxEvents = sd.events;
+        console.log(`SFX: ${sfxEvents.length} sự kiện từ ${SFX_PATH}.`);
+      } catch (e) { console.log(`(cảnh báo) không đọc được ${SFX_PATH}: ${e.message} — chạy như không có SFX.`); }
+    } else console.log(`(cảnh báo) không thấy file SFX ${SFX_PATH} — chạy như không có SFX.`);
+  }
 
   const { unmatchedLines, extraCaptions, firstUnmatched, lastMatched } = matchCaptions(lines, capData.captions);
   console.log(`Caption lạ bỏ qua: ${extraCaptions.length}`);
@@ -548,8 +678,14 @@ async function main() {
   const dlgMix = bus(dlg, 'd');
   let voiceTag;
   if (narMix && dlgMix) {
-    filterParts.push(`${dlgMix}${narMix}sidechaincompress=threshold=0.05:ratio=6:attack=20:release=400[dd]`);
-    filterParts.push(`[nmix][dd]amix=inputs=2:normalize=0:duration=longest,apad[aout]`);
+    // [nmix] được dùng 2 lần (sidechain của sidechaincompress + đầu vào
+    // của amix cuối) nên PHẢI asplit rõ ràng: không split, ffmpeg chỉ đưa
+    // các frame lời dẫn tới khi bus thoại kết thúc — lời dẫn nằm sau thoại
+    // cuối (vd câu hook cuối video) bị mất hẳn. Đã đo được: câu say ở
+    // 2–3s chỉ còn -91 dB (im lặng) khi không split, -21.5 dB khi có split.
+    filterParts.push('[nmix]asplit=2[nmix1][nmix2]');
+    filterParts.push(`${dlgMix}[nmix1]sidechaincompress=threshold=0.05:ratio=6:attack=20:release=400[dd]`);
+    filterParts.push(`[nmix2][dd]amix=inputs=2:normalize=0:duration=longest,apad[aout]`);
     voiceTag = '[aout]';
   } else {
     voiceTag = narMix || dlgMix;
@@ -557,6 +693,16 @@ async function main() {
   const filter = filterParts.join(';');
   const voiceTrack = path.join(WORK_DIR, 'voice_track.wav');
   await run('ffmpeg', ['-y', '-v', 'error', ...inputs, '-filter_complex', filter, '-map', voiceTag, '-t', String(outDur), voiceTrack]);
+
+  // Ráp track SFX (v1.1.4): chỉ chạy khi có sự kiện SFX; tải lỗi hết thì
+  // sfxTrack = null và bước mux dưới chạy như bản cũ.
+  let sfxTrack = null, sfxStats = null;
+  if (sfxEvents.length) {
+    const built = await buildSfxTrack(sfxEvents, outDur);
+    sfxTrack = built.track; sfxStats = built.stats;
+    if (sfxTrack) console.log(`SFX: ${sfxStats.segments} đoạn (${sfxStats.oneShots} one-shot, ${sfxStats.loops} loop), dùng được ${sfxStats.used}, bỏ ${sfxStats.skipped}, tổng ~${sfxStats.totalSeconds.toFixed(1)}s.`);
+    else console.log('SFX: không đoạn nào dùng được — chạy như không có SFX.');
+  }
 
   // Nếu tiếng kéo dài quá video (đoạn thoại cuối bị xếp trễ dồn lại) thì
   // kéo dài video bằng khung hình cuối (tpad) thay vì cắt mất câu cuối.
@@ -578,9 +724,23 @@ async function main() {
   // nhạc ở đúng mức volume đã đặt (không bị amix chia đôi đường tiếng).
   // Nhạc cũng DUCK dưới giọng (sidechaincompress, sidechain là giọng):
   // có người nói thì nhạc tự nhỏ lại, hết nói thì nhạc tự to lại.
+  // (v1.1.4) Có SFX thì nhạc duck dưới GIỌNG + SFX gộp: giọng và SFX
+  // trộn trước thành 1 sidechain [sc], nhạc bị nén theo [sc], rồi 3 đường
+  // (giọng, SFX, nhạc-đã-duck) trộn lại. Không có nhạc thì giọng + SFX
+  // trộn thẳng (không sidechain). Không có SFX thì giữ nguyên filter cũ.
   const muxArgs = ['-y', '-v', 'error', '-i', videoInEff, '-i', voiceTrack];
   let muxFilter = null;
-  if (MUSIC) {
+  if (sfxTrack) {
+    muxArgs.push('-i', sfxTrack);
+    if (MUSIC) {
+      muxArgs.push('-stream_loop', '-1', '-i', MUSIC);
+      muxFilter = `[1:a]volume=1.0,asplit=2[v1][v2];[2:a]volume=1.0,asplit=2[s1][s2];[3:a]volume=${MUSIC_VOL},apad[m];[v1][s1]amix=inputs=2:normalize=0[sc];[m][sc]sidechaincompress=threshold=0.05:ratio=4:attack=20:release=500[md];[v2][s2][md]amix=inputs=3:normalize=0:duration=first:dropout_transition=0[a]`;
+      muxArgs.push('-filter_complex', muxFilter, '-map', '0:v', '-map', '[a]');
+    } else {
+      muxFilter = `[1:a][2:a]amix=inputs=2:normalize=0:duration=first:dropout_transition=0[a]`;
+      muxArgs.push('-filter_complex', muxFilter, '-map', '0:v', '-map', '[a]');
+    }
+  } else if (MUSIC) {
     muxArgs.push('-stream_loop', '-1', '-i', MUSIC);
     muxFilter = `[1:a]volume=1.0,asplit=2[v1][v2];[2:a]volume=${MUSIC_VOL},apad[m];[m][v1]sidechaincompress=threshold=0.05:ratio=4:attack=20:release=500[md];[v2][md]amix=inputs=2:normalize=0:duration=first:dropout_transition=0[a]`;
     muxArgs.push('-filter_complex', muxFilter, '-map', '0:v', '-map', '[a]');
@@ -596,7 +756,8 @@ async function main() {
     outSeconds: outDur,
     maxLagSeconds: sched.maxLag,
     videoPadded: padded,
-    ducking: { dialogueUnderNarration: !!(narMix && dlgMix), musicUnderVoice: !!MUSIC },
+    ducking: { dialogueUnderNarration: !!(narMix && dlgMix), musicUnderVoice: !!MUSIC, musicUnderSfx: !!(sfxTrack && MUSIC) },
+    sfx: sfxTrack ? { events: sfxStats.events, segments: sfxStats.segments, oneShots: sfxStats.oneShots, loops: sfxStats.loops, usedSegments: sfxStats.used, skippedSegments: sfxStats.skipped, totalSeconds: +sfxStats.totalSeconds.toFixed(2), musicUnderSfx: !!MUSIC } : null,
     voiceId: VOICE_ID, model: MODEL_ID,
     lines: lines.map((l, i) => ({ i: i + 1, kind: l.kind, time: l.time, start: l.start, dur: l.dur, lag: l.lag, speaker: l.speaker, pitch: l.pitch, key: l.keyMasked, chars: l.chars }))
   };
@@ -625,6 +786,7 @@ async function main() {
     title: script.video_title || script.name || '',
     description: script.video_description || script.description || '',
     tags: Array.isArray(script.video_tags) ? script.video_tags : [],
+    sfx: sfxTrack ? { events: sfxStats.events, segments: sfxStats.segments, oneShots: sfxStats.oneShots, loops: sfxStats.loops, usedSegments: sfxStats.used, skippedSegments: sfxStats.skipped, totalSeconds: +sfxStats.totalSeconds.toFixed(2), musicUnderSfx: !!MUSIC } : null,
     chapters: lines.filter((l) => l.chapter && typeof l.time === 'number')
       .map((l) => ({ t: l.time, title: l.chapter })),
     hook: hook ? { start: hook.start, end: hook.end, text: hook.text, auto: hook.auto } : null,
@@ -639,4 +801,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error('VOICE THẤT BẠI:', e && e.stack || e); process.exit(1); });
-module.exports = { extractLines, matchCaptions, hookWindow, hookWindows, scheduleLines, fallbackPitch, MAX_SHORT_SECONDS };
+module.exports = { extractLines, matchCaptions, hookWindow, hookWindows, scheduleLines, fallbackPitch, buildSfxSegments, MAX_SHORT_SECONDS };
