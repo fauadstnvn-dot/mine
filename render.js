@@ -32,6 +32,8 @@
 //   OUT_CAPTIONS (mặc định ./captions.json) — mốc thời gian từng câu thoại
 //   IMG_FORMAT   png | jpeg (mặc định png; jpeg nhẹ và nhanh hơn, chất lượng vẫn tốt)
 //   JPEG_QUALITY (mặc định 0.92, chỉ dùng khi IMG_FORMAT=jpeg)
+//   SHOT_TIMEOUT (mặc định 120000) thời gian chờ tối đa cho 1 lần chụp frame, ms
+//   SHOT_RETRIES (mặc định 3) số lần thử chụp lại 1 frame khi bị timeout/rỗng
 //
 // Chạy:  node render.js
 // Yêu cầu: npm install playwright  +  npx playwright install chromium
@@ -50,6 +52,8 @@ const OUT_VIDEO = process.env.OUT_VIDEO || './video_silent.mp4';
 const OUT_CAPTIONS = process.env.OUT_CAPTIONS || './captions.json';
 const IMG_FORMAT = (process.env.IMG_FORMAT || 'png').toLowerCase();
 const JPEG_QUALITY = parseFloat(process.env.JPEG_QUALITY || '0.92');
+const SHOT_TIMEOUT = parseInt(process.env.SHOT_TIMEOUT || '120000', 10);
+const SHOT_RETRIES = parseInt(process.env.SHOT_RETRIES || '3', 10);
 const MAX_SKIP_FRAMES = 1800; // quá 60s (ở 30fps) mà màn hình chờ vẫn chưa tắt thì báo lỗi
 
 if (!GAME_URL) { console.error('Thiếu GAME_URL'); process.exit(2); }
@@ -239,6 +243,26 @@ async function main() {
     if (!ff.stdin.write(buf)) await new Promise((r) => ff.stdin.once('drain', r));
   }
 
+  // Chụp màn hình có thử lại: máy chạy GitHub không có GPU nên việc đọc
+  // WebGL (ReadPixels) thỉnh thoảng kẹt quá 30s mặc định của Playwright —
+  // một lần kẹt không được phép giết cả lần render dài. Timeout 120s/lần,
+  // thử lại tối đa 3 lần, mỗi lần cách nhau 2s.
+  async function takeShot(opts) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= SHOT_RETRIES; attempt++) {
+      try {
+        const shot = await page.screenshot({ timeout: SHOT_TIMEOUT, ...opts });
+        if (shot && shot.length) return shot;
+        lastErr = new Error('Không chụp được màn hình (screenshot rỗng).');
+      } catch (e) {
+        lastErr = e;
+        console.log(`Chụp frame thử lần ${attempt}/${SHOT_RETRIES} chưa được (${String((e && e.message) || e).slice(0, 160)}) — thử lại sau 2s...`);
+      }
+      await sleep(2000);
+    }
+    throw new Error(`Không chụp được màn hình sau ${SHOT_RETRIES} lần thử: ${String((lastErr && lastErr.message) || lastErr).slice(0, 300)}`);
+  }
+
   let emitted = 0;      // số frame đã đưa vào video (quyết định mốc thời gian)
   let skipped = 0;      // số frame bỏ qua vì màn hình chờ chưa tắt
   let startedRun = false;
@@ -259,7 +283,7 @@ async function main() {
             const el = document.getElementById('kbMsg');
             return el ? el.textContent.slice(0, 1000) : '';
           });
-          await page.screenshot({ path: 'render-debug.png' });
+          await takeShot({ path: 'render-debug.png' });
           throw new Error('Kịch bản không bắt đầu chạy. Thông báo của game: ' + (kbMsg || '(trống)') + '. Đã lưu ảnh render-debug.png');
         }
         continue;
@@ -272,10 +296,9 @@ async function main() {
       // Caption ghi trong bước này thuộc về frame sắp ghi (mốc = số frame đã có).
       for (const c of r.caps) captionsOut.push({ t: emitted / FPS, text: c.text, head: c.head });
       // Chụp TOÀN TRANG (game + khung chữ + popup báo giấy) thay vì chỉ canvas.
-      const shot = await page.screenshot(IMG_FORMAT === 'jpeg'
+      const shot = await takeShot(IMG_FORMAT === 'jpeg'
         ? { type: 'jpeg', quality: Math.round(JPEG_QUALITY * 100) }
         : { type: 'png' });
-      if (!shot || !shot.length) throw new Error('Không chụp được màn hình (screenshot rỗng).');
       await writeFrame(shot);
       emitted++;
       if (emitted % 300 === 0) {
